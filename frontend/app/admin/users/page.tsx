@@ -2,7 +2,7 @@
 
 import { Card } from '@/components/Card'
 import { api } from '@/lib/api'
-import { FiEdit2, FiTrash2, FiPlus } from 'react-icons/fi'
+import { FiEdit2, FiTrash2, FiPlus, FiX } from 'react-icons/fi'
 import { useEffect, useState } from 'react'
 
 interface User {
@@ -23,6 +23,11 @@ export default function UsersPage() {
   const [keys, setKeys] = useState<SubApiKey[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [showForm, setShowForm] = useState(false)
+  const [formData, setFormData] = useState({ email: '', name: '', role: 'user' as const })
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchData = async () => {
@@ -45,6 +50,30 @@ export default function UsersPage() {
     fetchData()
   }, [])
 
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSubmitting(true)
+    setSubmitError(null)
+    setSuccessMessage(null)
+
+    try {
+      const newUser = await api.admin.createUser({
+        email: formData.email,
+        name: formData.name,
+        role: 'user',
+      })
+      setUsers([...users, newUser])
+      setFormData({ email: '', name: '', role: 'user' })
+      setShowForm(false)
+      setSuccessMessage(`User "${newUser.name}" created successfully!`)
+      setTimeout(() => setSuccessMessage(null), 3000)
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : 'Failed to create user')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto px-4 py-8">
@@ -65,12 +94,21 @@ export default function UsersPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
+      {successMessage && (
+        <div className="mb-4 bg-green-50 border border-green-200 rounded-lg p-4">
+          <p className="text-green-800">{successMessage}</p>
+        </div>
+      )}
+
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">User Management</h1>
           <p className="text-gray-600 mt-2">Manage hackathon participants and team members</p>
         </div>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg flex items-center gap-2 transition-colors">
+        <button
+          onClick={() => setShowForm(!showForm)}
+          className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg flex items-center gap-2 transition-colors"
+        >
           <FiPlus /> Add User
         </button>
       </div>
@@ -132,39 +170,67 @@ export default function UsersPage() {
         </div>
       </Card>
 
-      {/* Placeholder for user creation form */}
-      <Card className="mt-8">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Add New User</h2>
-        <p className="text-gray-600 text-sm italic">
-          Form placeholder - will be connected to backend API
-        </p>
-        <div className="mt-4 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
-            <input
-              type="text"
-              placeholder="e.g., Team Alpha"
-              disabled
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500"
-            />
+      {/* User creation form */}
+      {showForm && (
+        <Card className="mt-8 border-blue-200 bg-blue-50">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900">Add New User</h2>
+            <button
+              onClick={() => setShowForm(false)}
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <FiX className="text-xl" />
+            </button>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
-            <input
-              type="email"
-              placeholder="e.g., team@hackathon.dev"
-              disabled
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-gray-500"
-            />
-          </div>
-          <button
-            disabled
-            className="bg-gray-300 text-gray-600 font-medium py-2 px-4 rounded-lg cursor-not-allowed"
-          >
-            Create User
-          </button>
-        </div>
-      </Card>
+
+          {submitError && (
+            <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-3">
+              <p className="text-red-800 text-sm">{submitError}</p>
+            </div>
+          )}
+
+          <form onSubmit={handleCreateUser} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
+              <input
+                type="text"
+                placeholder="e.g., Team Alpha"
+                value={formData.name}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                required
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+              <input
+                type="email"
+                placeholder="e.g., team@hackathon.dev"
+                value={formData.email}
+                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                required
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                disabled={submitting}
+                className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-medium py-2 px-4 rounded-lg transition-colors"
+              >
+                {submitting ? 'Creating...' : 'Create User'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowForm(false)}
+                className="bg-gray-200 hover:bg-gray-300 text-gray-900 font-medium py-2 px-4 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </Card>
+      )}
     </div>
   )
 }
