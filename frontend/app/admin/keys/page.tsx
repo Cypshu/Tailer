@@ -29,6 +29,7 @@ export default function KeysPage() {
   const [keys, setKeys] = useState<SubApiKey[]>([])
   const [users, setUsers] = useState<User[]>([])
   const [revealedKey, setRevealedKey] = useState<string | null>(null)
+  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
@@ -116,6 +117,13 @@ export default function KeysPage() {
     } finally {
       setRevoking(null)
     }
+  }
+
+  const handleCopyKey = (key: string) => {
+    navigator.clipboard.writeText(key).then(() => {
+      setCopiedKeyId(Math.random().toString())
+      setTimeout(() => setCopiedKeyId(null), 2000)
+    })
   }
 
   const maskKey = (key: string) => {
@@ -314,8 +322,11 @@ export default function KeysPage() {
                     {isRevealed ? <FiEyeOff /> : <FiEye />}
                   </button>
                   <button
-                    className="text-gray-600 hover:text-gray-900 p-1.5 rounded hover:bg-gray-200 transition-colors"
-                    title="Copy to clipboard"
+                    onClick={() => handleCopyKey(key.key)}
+                    className={`p-1.5 rounded transition-colors ${
+                      copiedKeyId ? 'text-green-600 bg-green-100' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
+                    }`}
+                    title={copiedKeyId ? 'Copied!' : 'Copy to clipboard'}
                   >
                     <FiCopy />
                   </button>

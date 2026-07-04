@@ -31,6 +31,7 @@ interface UsageEvent {
 interface SubApiKey {
   id: string
   name: string
+  owner_id?: string
 }
 
 interface User {
@@ -204,16 +205,30 @@ export default function AdminDashboard() {
         {/* Quick Actions */}
         <Card title="Quick Actions">
           <div className="space-y-3">
-            <button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors">
+            <a
+              href="/admin/keys"
+              className="block w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-center"
+            >
               + Create Sub-API Key
-            </button>
-            <button className="w-full bg-gray-200 hover:bg-gray-300 text-gray-900 font-medium py-2 px-4 rounded-lg transition-colors">
+            </a>
+            <a
+              href="/admin/users"
+              className="block w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors text-center"
+            >
               + Add User
-            </button>
-            <button className="w-full bg-gray-200 hover:bg-gray-300 text-gray-900 font-medium py-2 px-4 rounded-lg transition-colors">
+            </a>
+            <button
+              disabled
+              className="w-full bg-gray-200 text-gray-600 font-medium py-2 px-4 rounded-lg cursor-not-allowed text-sm"
+              title="Coming soon"
+            >
               📊 Export Usage Report
             </button>
-            <button className="w-full bg-gray-200 hover:bg-gray-300 text-gray-900 font-medium py-2 px-4 rounded-lg transition-colors">
+            <button
+              disabled
+              className="w-full bg-gray-200 text-gray-600 font-medium py-2 px-4 rounded-lg cursor-not-allowed text-sm"
+              title="Coming soon"
+            >
               ⚙️ Provider Settings
             </button>
           </div>
@@ -226,7 +241,7 @@ export default function AdminDashboard() {
           {users
             .filter((u) => u.role === 'user')
             .map((user) => {
-              const userKeys = keys.filter((k) => k.id && user.id && k.id.includes(user.id))
+              const userKeys = keys.filter((k) => k.owner_id === user.id)
               const userUsage = usageEvents.filter((e) => e.user_id === user.id)
               return (
                 <div key={user.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">

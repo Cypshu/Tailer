@@ -37,6 +37,7 @@ export default function UserDashboard() {
   const [usageEvents, setUsageEvents] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchData = async () => {
@@ -60,6 +61,13 @@ export default function UserDashboard() {
 
     fetchData()
   }, [])
+
+  const handleCopyKey = (key: string) => {
+    navigator.clipboard.writeText(key).then(() => {
+      setCopiedKeyId(Math.random().toString())
+      setTimeout(() => setCopiedKeyId(null), 2000)
+    })
+  }
 
   if (loading) {
     return (
@@ -215,9 +223,16 @@ export default function UserDashboard() {
                   </div>
                 </div>
 
-                <button className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1">
-                  <FiCopy className="text-xs" /> Copy Key
-                </button>
+                {key.key && (
+                  <button
+                    onClick={() => handleCopyKey(key.key!)}
+                    className={`text-sm font-medium flex items-center gap-1 transition-colors ${
+                      copiedKeyId ? 'text-green-600' : 'text-blue-600 hover:text-blue-800'
+                    }`}
+                  >
+                    <FiCopy className="text-xs" /> {copiedKeyId ? 'Copied!' : 'Copy Key'}
+                  </button>
+                )}
               </div>
             ))
           ) : (
