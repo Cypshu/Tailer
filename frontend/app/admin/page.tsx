@@ -2,22 +2,113 @@
 
 import { Card } from '@/components/Card'
 import { StatCard } from '@/components/StatCard'
-import {
-  getTotalTokensUsed,
-  getTotalCostEstimated,
-  getActiveKeysCount,
-  mockSubApiKeys,
-  mockUsers,
-  mockUsageEvents,
-} from '@/lib/mockData'
+import { api } from '@/lib/api'
 import { FiKey, FiUsers, FiTrendingUp, FiActivity } from 'react-icons/fi'
+import { useEffect, useState } from 'react'
+
+interface DashboardStats {
+  active_keys: number
+  total_tokens_used: number
+  total_cost_estimated: number
+  active_users: number
+  total_requests: number
+}
+
+interface UsageEvent {
+  id: string
+  timestamp: string
+  sub_key_id: string
+  user_id: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  estimated_cost_eur: number
+  latency_ms: number
+  status: 'success' | 'failed'
+}
+
+interface SubApiKey {
+  id: string
+  name: string
+}
+
+interface User {
+  id: string
+  email: string
+  name: string
+  role: 'admin' | 'user'
+  created_at: string
+}
 
 export default function AdminDashboard() {
-  const totalTokens = getTotalTokensUsed()
-  const totalCost = getTotalCostEstimated()
-  const activeKeys = getActiveKeysCount()
-  const totalUsers = mockUsers.filter((u) => u.role === 'user').length
-  const totalRequests = mockUsageEvents.length
+  const [stats, setStats] = useState<DashboardStats | null>(null)
+  const [usageEvents, setUsageEvents] = useState<UsageEvent[]>([])
+  const [users, setUsers] = useState<User[]>([])
+  const [keys, setKeys] = useState<SubApiKey[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+        const [statsData, usageData, usersData, keysData] = await Promise.all([
+          api.admin.getDashboardStats(),
+          api.admin.getUsage(),
+          api.admin.getUsers(),
+          api.admin.getKeys(),
+        ])
+        setStats(statsData)
+        setUsageEvents(usageData)
+        setUsers(usersData)
+        setKeys(keysData)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load dashboard data')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchData()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="text-center">
+          <p className="text-gray-600">Loading dashboard...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">Error: {error}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!stats) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="text-center">
+          <p className="text-gray-600">No data available</p>
+        </div>
+      </div>
+    )
+  }
+
+  const totalTokens = stats.total_tokens_used
+  const totalCost = stats.total_cost_estimated
+  const activeKeys = stats.active_keys
+  const totalUsers = stats.active_users
+  const totalRequests = stats.total_requests
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -74,13 +165,13 @@ export default function AdminDashboard() {
                 </tr>
               </thead>
               <tbody>
-                {mockUsageEvents.slice(0, 5).map((event) => (
+                {usageEvents.slice(0, 5).map((event) => (
                   <tr key={event.id} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="py-3 px-4 text-gray-600">
                       {new Date(event.timestamp).toLocaleTimeString()}
                     </td>
                     <td className="py-3 px-4 text-gray-900">
-                      {mockSubApiKeys.find((k) => k.id === event.sub_key_id)?.name}
+                      {keys.find((k) => k.id === event.sub_key_id)?.name}
                     </td>
                     <td className="py-3 px-4 text-gray-600">{event.model}</td>
                     <td className="py-3 px-4 text-right text-gray-600">{event.total_tokens}</td>
@@ -132,11 +223,11 @@ export default function AdminDashboard() {
       {/* Active Users Section */}
       <Card title="Active Users">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {mockUsers
+          {users
             .filter((u) => u.role === 'user')
             .map((user) => {
-              const userKeys = mockSubApiKeys.filter((k) => k.owner_id === user.id)
-              const userUsage = mockUsageEvents.filter((e) => e.user_id === user.id)
+              const userKeys = keys.filter((k) => k.id && user.id && k.id.includes(user.id))
+              const userUsage = usageEvents.filter((e) => e.user_id === user.id)
               return (
                 <div key={user.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
                   <h4 className="font-semibold text-gray-900">{user.name}</h4>

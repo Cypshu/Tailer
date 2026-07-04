@@ -1,17 +1,80 @@
 'use client'
 
 import { Card } from '@/components/Card'
-import { mockSubApiKeys, mockUsers } from '@/lib/mockData'
+import { api } from '@/lib/api'
 import { FiCopy, FiRotateCw, FiTrash2, FiPlus, FiEye, FiEyeOff } from 'react-icons/fi'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+
+interface User {
+  id: string
+  email: string
+  name: string
+  role: 'admin' | 'user'
+  created_at: string
+}
+
+interface SubApiKey {
+  id: string
+  name: string
+  key: string
+  owner_id: string
+  status: string
+  daily_request_limit?: number
+  monthly_token_limit?: number
+  monthly_budget_eur?: number
+  allowed_models?: string[]
+}
 
 export default function KeysPage() {
+  const [keys, setKeys] = useState<SubApiKey[]>([])
+  const [users, setUsers] = useState<User[]>([])
   const [revealedKey, setRevealedKey] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+        const [keysData, usersData] = await Promise.all([
+          api.admin.getKeys(),
+          api.admin.getUsers(),
+        ])
+        setKeys(keysData)
+        setUsers(usersData)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load keys')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchData()
+  }, [])
 
   const maskKey = (key: string) => {
     const start = key.substring(0, 10)
     const end = key.substring(key.length - 5)
     return `${start}...${end}`
+  }
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <p className="text-gray-600">Loading keys...</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">Error: {error}</p>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -27,8 +90,8 @@ export default function KeysPage() {
       </div>
 
       <div className="space-y-4">
-        {mockSubApiKeys.map((key) => {
-          const owner = mockUsers.find((u) => u.id === key.owner_id)
+        {keys.map((key) => {
+          const owner = users.find((u) => u.id === key.owner_id)
           const isRevealed = revealedKey === key.id
 
           return (
@@ -77,40 +140,36 @@ export default function KeysPage() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4 pb-4 border-b border-gray-200">
                 <div>
                   <p className="text-xs font-medium text-gray-600 uppercase">Daily Limit</p>
-                  <p className="text-sm font-semibold text-gray-900">{key.daily_request_limit}</p>
+                  <p className="text-sm font-semibold text-gray-900">{key.daily_request_limit || '-'}</p>
                 </div>
                 <div>
                   <p className="text-xs font-medium text-gray-600 uppercase">Monthly Tokens</p>
                   <p className="text-sm font-semibold text-gray-900">
-                    {(key.monthly_token_limit / 1000000).toFixed(1)}M
+                    {key.monthly_token_limit ? (key.monthly_token_limit / 1000000).toFixed(1) : '-'}M
                   </p>
                 </div>
                 <div>
                   <p className="text-xs font-medium text-gray-600 uppercase">Budget</p>
-                  <p className="text-sm font-semibold text-gray-900">€{key.monthly_budget_eur.toFixed(2)}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium text-gray-600 uppercase">Expires</p>
-                  <p className="text-sm font-semibold text-gray-900">
-                    {new Date(key.expires_at).toLocaleDateString()}
-                  </p>
+                  <p className="text-sm font-semibold text-gray-900">€{key.monthly_budget_eur?.toFixed(2) || '-'}</p>
                 </div>
               </div>
 
               {/* Models */}
-              <div className="mb-4 pb-4 border-b border-gray-200">
-                <p className="text-xs font-medium text-gray-600 uppercase mb-2">Allowed Models</p>
-                <div className="flex flex-wrap gap-2">
-                  {key.allowed_models.map((model) => (
-                    <span
-                      key={model}
-                      className="inline-block bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-medium"
-                    >
-                      {model}
-                    </span>
-                  ))}
+              {key.allowed_models && key.allowed_models.length > 0 && (
+                <div className="mb-4 pb-4 border-b border-gray-200">
+                  <p className="text-xs font-medium text-gray-600 uppercase mb-2">Allowed Models</p>
+                  <div className="flex flex-wrap gap-2">
+                    {key.allowed_models.map((model) => (
+                      <span
+                        key={model}
+                        className="inline-block bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs font-medium"
+                      >
+                        {model}
+                      </span>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Actions */}
               <div className="flex items-center gap-2">

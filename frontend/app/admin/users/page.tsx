@@ -1,11 +1,67 @@
 'use client'
 
 import { Card } from '@/components/Card'
-import { mockUsers, mockSubApiKeys } from '@/lib/mockData'
+import { api } from '@/lib/api'
 import { FiEdit2, FiTrash2, FiPlus } from 'react-icons/fi'
+import { useEffect, useState } from 'react'
+
+interface User {
+  id: string
+  email: string
+  name: string
+  role: 'admin' | 'user'
+  created_at: string
+}
+
+interface SubApiKey {
+  id: string
+  owner_id: string
+}
 
 export default function UsersPage() {
-  const users = mockUsers.filter((u) => u.role === 'user')
+  const [users, setUsers] = useState<User[]>([])
+  const [keys, setKeys] = useState<SubApiKey[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+        const [usersData, keysData] = await Promise.all([
+          api.admin.getUsers(),
+          api.admin.getKeys(),
+        ])
+        setUsers(usersData.filter((u: User) => u.role === 'user'))
+        setKeys(keysData)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load users')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchData()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <p className="text-gray-600">Loading users...</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">Error: {error}</p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -33,7 +89,7 @@ export default function UsersPage() {
             </thead>
             <tbody>
               {users.map((user) => {
-                const userKeys = mockSubApiKeys.filter((k) => k.owner_id === user.id)
+                const userKeys = keys.filter((k) => k.owner_id === user.id)
                 return (
                   <tr key={user.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
                     <td className="py-4 px-4">
@@ -49,7 +105,7 @@ export default function UsersPage() {
                     </td>
                     <td className="py-4 px-4">
                       <p className="text-gray-600 text-sm">
-                        {new Date(user.createdAt).toLocaleDateString()}
+                        {new Date(user.created_at).toLocaleDateString()}
                       </p>
                     </td>
                     <td className="py-4 px-4 text-center">

@@ -2,23 +2,97 @@
 
 import { Card } from '@/components/Card'
 import { StatCard } from '@/components/StatCard'
-import { mockSubApiKeys, mockUsageEvents, getUserKeys, getUserUsageEvents } from '@/lib/mockData'
+import { api } from '@/lib/api'
 import { FiKey, FiTrendingUp, FiActivity, FiCopy } from 'react-icons/fi'
+import { useEffect, useState } from 'react'
 
-// Simulating logged-in user
-const CURRENT_USER_ID = 'user_1'
+interface SubApiKey {
+  id: string
+  name: string
+  key?: string
+  owner_id?: string
+  allowed_models?: string[]
+  status?: string
+  daily_request_limit?: number
+  monthly_token_limit?: number
+  monthly_budget_eur?: number
+  created_at?: string
+  expires_at?: string
+}
+
+interface UserStats {
+  api_keys: number
+  total_tokens_used: number
+  estimated_cost: number
+  total_requests: number
+  monthly_token_limit: number
+  monthly_budget: number
+  token_usage_percent: number
+  budget_usage_percent: number
+}
 
 export default function UserDashboard() {
-  const userKeys = getUserKeys(CURRENT_USER_ID)
-  const userUsageEvents = getUserUsageEvents(CURRENT_USER_ID)
+  const [stats, setStats] = useState<UserStats | null>(null)
+  const [keys, setKeys] = useState<SubApiKey[]>([])
+  const [usageEvents, setUsageEvents] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const totalTokensUsed = userUsageEvents.reduce((sum, event) => sum + event.total_tokens, 0)
-  const totalCostEstimated = userUsageEvents.reduce((sum, event) => sum + event.estimated_cost_eur, 0)
-  const monthlyTokenLimit = userKeys.reduce((sum, key) => sum + key.monthly_token_limit, 0)
-  const monthlyBudget = userKeys.reduce((sum, key) => sum + key.monthly_budget_eur, 0)
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true)
+        setError(null)
+        const [statsData, keysData, usageData] = await Promise.all([
+          api.user.getStats(),
+          api.user.getMyKeys(),
+          api.user.getMyUsage(),
+        ])
+        setStats(statsData)
+        setKeys(keysData)
+        setUsageEvents(usageData)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load user dashboard')
+      } finally {
+        setLoading(false)
+      }
+    }
 
-  const tokenUsagePercent = monthlyTokenLimit > 0 ? (totalTokensUsed / monthlyTokenLimit) * 100 : 0
-  const budgetUsagePercent = monthlyBudget > 0 ? (totalCostEstimated / monthlyBudget) * 100 : 0
+    fetchData()
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <p className="text-gray-600">Loading dashboard...</p>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+          <p className="text-red-800">Error: {error}</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!stats) {
+    return (
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        <p className="text-gray-600">No data available</p>
+      </div>
+    )
+  }
+
+  const totalTokensUsed = stats.total_tokens_used
+  const totalCostEstimated = stats.estimated_cost
+  const monthlyTokenLimit = stats.monthly_token_limit
+  const monthlyBudget = stats.monthly_budget
+  const tokenUsagePercent = stats.token_usage_percent
+  const budgetUsagePercent = stats.budget_usage_percent
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -31,7 +105,7 @@ export default function UserDashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <StatCard
           label="API Keys"
-          value={userKeys.length}
+          value={stats.api_keys}
           icon={<FiKey />}
         />
         <StatCard
@@ -46,7 +120,7 @@ export default function UserDashboard() {
         />
         <StatCard
           label="Total Requests"
-          value={userUsageEvents.length}
+          value={stats.total_requests}
           icon={<FiActivity />}
         />
       </div>
@@ -107,34 +181,36 @@ export default function UserDashboard() {
       {/* My API Keys */}
       <Card title="My API Keys" className="mb-8">
         <div className="space-y-4">
-          {userKeys.length > 0 ? (
-            userKeys.map((key) => (
+          {keys.length > 0 ? (
+            keys.map((key) => (
               <div key={key.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <h4 className="font-semibold text-gray-900">{key.name}</h4>
-                    <p className="text-xs text-gray-600 font-mono mt-1">
-                      {key.key.substring(0, 15)}...{key.key.substring(key.key.length - 5)}
-                    </p>
+                    {key.key && (
+                      <p className="text-xs text-gray-600 font-mono mt-1">
+                        {key.key.substring(0, 15)}...{key.key.substring(key.key.length - 5)}
+                      </p>
+                    )}
                   </div>
                   <span className="inline-block bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-medium">
-                    Active
+                    {key.status || 'Active'}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-3 gap-4 text-sm mb-3 pb-3 border-t border-gray-100">
                   <div>
                     <p className="text-gray-600">Allowed Models</p>
-                    <p className="font-medium text-gray-900">{key.allowed_models.length}</p>
+                    <p className="font-medium text-gray-900">{key.allowed_models?.length || 0}</p>
                   </div>
                   <div>
                     <p className="text-gray-600">Daily Requests</p>
-                    <p className="font-medium text-gray-900">{key.daily_request_limit}</p>
+                    <p className="font-medium text-gray-900">{key.daily_request_limit || '-'}</p>
                   </div>
                   <div>
                     <p className="text-gray-600">Expires</p>
                     <p className="font-medium text-gray-900">
-                      {new Date(key.expires_at).toLocaleDateString()}
+                      {key.expires_at ? new Date(key.expires_at).toLocaleDateString() : '-'}
                     </p>
                   </div>
                 </div>
@@ -164,7 +240,7 @@ export default function UserDashboard() {
               </tr>
             </thead>
             <tbody>
-              {userUsageEvents.slice(0, 10).map((event) => (
+              {usageEvents.slice(0, 10).map((event) => (
                 <tr key={event.id} className="border-b border-gray-100 hover:bg-gray-50">
                   <td className="py-3 px-4 text-gray-600">
                     {new Date(event.timestamp).toLocaleTimeString()}
