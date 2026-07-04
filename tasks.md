@@ -28,9 +28,10 @@ Use this file as the active task board for coding agents working in the standalo
 
 ### 1. Backend Persistence Foundation
 
-- Status: `[ ]`
+- Status: `[~]`
 - Owner: `backend-agent`
 - Goal: replace the current in-memory-only backend foundation with real persistence scaffolding.
+- Note: Database layer scaffolded. Ready for authentication integration.
 
 Scope:
 - Add database configuration to backend settings using project-scoped env names
@@ -71,9 +72,10 @@ Acceptance:
 
 ### 3. Admin Dashboard Correctness Pass
 
-- Status: `[ ]`
+- Status: `[x]`
 - Owner: `frontend-agent`
 - Goal: fix current admin UI inconsistencies now that read/write integration exists.
+- Completed: Fixed key counting logic, implemented copy-to-clipboard, added navigation to forms.
 
 Scope:
 - Fix incorrect user-to-key counting logic in `frontend/app/admin/page.tsx`
