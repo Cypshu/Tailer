@@ -1,13 +1,13 @@
 # TAILER Agent Tasks
 
-Use this file as the direct task board for active coding agents.
+Use this file as the active task board for coding agents working in the standalone `Tailer/` repository.
 
 ## Rules
 
-- Work only inside the standalone `Tailer/` repository.
+- Work only inside `Tailer/`.
 - Update task status when starting or finishing work.
-- Do not silently change scope; add a note under the task instead.
-- Prefer completing one vertical slice before starting a new subsystem.
+- Do not silently expand scope; add a short note under the task if scope changes.
+- Prefer finishing the current milestone before starting a new subsystem.
 
 ## Status Key
 
@@ -16,61 +16,75 @@ Use this file as the direct task board for active coding agents.
 - `[x]` done
 - `[!]` blocked
 
+## Current State
+
+- Phase 1 setup is complete.
+- Frontend reads from the backend.
+- Admin create/revoke actions exist.
+- Backend is still fully in-memory and unauthenticated.
+- User identity is still hardcoded in the backend.
+
 ## Active Tasks
 
-### 1. Admin Write Actions Integration
-
-- Status: `[ ]`
-- Owner: `programmatic-agent`
-- Goal: complete the admin-side write path against the existing backend API.
-
-Scope:
-- Connect the user creation form in `frontend/app/admin/users/page.tsx` to `POST /admin/users`
-- Connect the key creation form in `frontend/app/admin/keys/page.tsx` to `POST /admin/keys`
-- Connect key revoke actions in `frontend/app/admin/keys/page.tsx` to `DELETE /admin/keys/{key_id}`
-- Refresh dashboard, users, and keys state after successful mutations
-- Handle loading, success, and failure states clearly in the UI
-- Do not start rotate/edit/delete features that the backend does not support yet
-
-Acceptance:
-- Admin can create a user from the UI.
-- Admin can create a Sub-API key from the UI.
-- Admin can revoke a key from the UI.
-- The admin dashboard reflects those changes after refresh or local state update.
-- `npm run build` still passes.
-
-### 2. Repository Hygiene
-
-- Status: `[ ]`
-- Owner: `admin-agent`
-- Goal: clean repo structure and keep the workspace stable for multi-agent work.
-
-Scope:
-- Decide whether `backend/venv/` stays in repo tree or is removed from tracked workspace use.
-- Create `docs/` when documentation starts splitting out of `README.md`.
-- Keep root planning and monitoring files current.
-
-Acceptance:
-- Repo structure matches intended long-term layout more closely.
-- No confusion about active root or active plans.
-
-### 3. Backend Persistence Foundation
+### 1. Backend Persistence Foundation
 
 - Status: `[ ]`
 - Owner: `backend-agent`
-- Goal: prepare the backend for moving off in-memory mock data.
+- Goal: replace the current in-memory-only backend foundation with real persistence scaffolding.
 
 Scope:
-- Introduce a real backend project structure for persistence work
-- Add database connection scaffolding
-- Add Alembic setup
-- Define initial database models for users, projects, sub keys, and usage events
-- Do not remove the current mock flow until the replacement path is ready
+- Add database configuration to backend settings using project-scoped env names
+- Add SQLAlchemy or SQLModel setup and session management
+- Add Alembic
+- Create initial persisted models for:
+  - users
+  - projects
+  - sub_api_keys
+  - usage_events
+- Keep the current app runnable while the persistence layer is introduced
+- Align docker/environment naming with the backend config as part of this work
 
 Acceptance:
-- Backend has a clear persistence foundation.
-- Migration tooling exists.
-- Current app still runs locally.
+- Backend starts with database scaffolding in place
+- Migrations can be created and applied
+- Current API routes still run locally
+- No hard dependency remains on raw global process env names
+
+### 2. Authentication Skeleton
+
+- Status: `[ ]`
+- Owner: `backend-agent`
+- Goal: remove the hardcoded user context and introduce a real auth base.
+
+Scope:
+- Add password hashing
+- Add login endpoint
+- Add auth token or session mechanism
+- Replace `CURRENT_USER_ID = "user_1"` in `backend/app/api/user.py`
+- Add admin/user route protection primitives
+- Add a default admin bootstrap path for local development
+
+Acceptance:
+- Admin can authenticate
+- `/user/me` is identity-driven instead of hardcoded
+- Admin routes are protected from anonymous access
+
+### 3. Admin Dashboard Correctness Pass
+
+- Status: `[ ]`
+- Owner: `frontend-agent`
+- Goal: fix current admin UI inconsistencies now that read/write integration exists.
+
+Scope:
+- Fix incorrect user-to-key counting logic in `frontend/app/admin/page.tsx`
+- Replace dead quick-action buttons with real navigation or remove them
+- Make copy-to-clipboard actions work where shown
+- Review any UI text that still implies placeholder behavior where the feature is live
+
+Acceptance:
+- Admin dashboard shows correct key counts per user
+- No visible button is misleadingly inert without explanation
+- Build still passes
 
 ## Blocked Tasks
 
@@ -78,31 +92,46 @@ Acceptance:
 
 - Status: `[!]`
 - Owner: `admin-agent`
-- Blocker: missing private repo URL for `origin`.
+- Blocker: missing private repo URL for `origin`
 
 Needed:
-- GitHub or GitLab repo URL for the standalone `Tailer` repository.
+- GitHub or GitLab repository URL for the standalone `Tailer` repo
 
 ## Completed Tasks
+
+### Repository Separation
+
+- Status: `[x]`
+- Standalone `Tailer/` repo created outside `hackathon-prim`
+- Old nested copy removed
 
 ### Baseline Stabilization
 
 - Status: `[x]`
-- Frontend dependency drift fixed.
-- Backend bearer-header handling fixed.
-- Standalone project root established.
-- Implementation plan copied into standalone repo.
-
-### Frontend Read Integration
-
-- Status: `[x]`
-- Admin dashboard, users page, keys page, and user dashboard read from the backend API.
-- Shared frontend API client exists in `frontend/lib/api.ts`.
+- Frontend dependency drift fixed
+- Backend bearer-header handling fixed
+- Implementation plan copied into standalone repo
 
 ### Local Dev Infrastructure
 
 - Status: `[x]`
-- Root `.env.example` exists.
-- `docker-compose.yml` exists.
-- Backend Dockerfile exists.
-- Frontend Dockerfile exists.
+- Root `.env.example` exists
+- Root `docker-compose.yml` exists
+- Backend Dockerfile exists
+- Frontend Dockerfile exists
+
+### Frontend Read Integration
+
+- Status: `[x]`
+- Admin dashboard reads from backend endpoints
+- Admin users page reads from backend endpoints
+- Admin keys page reads from backend endpoints
+- User dashboard reads from backend endpoints
+- Shared frontend API client exists
+
+### Admin Write Actions Integration
+
+- Status: `[x]`
+- User creation form calls `POST /admin/users`
+- Key creation form calls `POST /admin/keys`
+- Key revoke action calls `DELETE /admin/keys/{key_id}`
