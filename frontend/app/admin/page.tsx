@@ -197,7 +197,7 @@ export default function AdminDashboard() {
           </div>
           <div className="mt-4 pt-4 border-t border-gray-200">
             <a href="/admin/keys" className="text-blue-600 hover:text-blue-800 text-sm font-medium">
-              View all requests →
+              Manage API keys →
             </a>
           </div>
         </Card>
@@ -259,8 +259,12 @@ export default function AdminDashboard() {
                       {userUsage.reduce((sum, e) => sum + e.total_tokens, 0)}
                     </p>
                   </div>
-                  <button className="mt-3 text-blue-600 hover:text-blue-800 text-sm font-medium">
-                    View Details →
+                  <button
+                    disabled
+                    title="User detail view is not implemented"
+                    className="mt-3 text-gray-400 text-sm font-medium cursor-not-allowed"
+                  >
+                    User details unavailable
                   </button>
                 </div>
               )

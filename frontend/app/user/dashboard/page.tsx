@@ -31,10 +31,19 @@ interface UserStats {
   budget_usage_percent: number
 }
 
+interface UsageEvent {
+  id: string
+  timestamp: string
+  model: string
+  total_tokens: number
+  estimated_cost_eur: number
+  status: string
+}
+
 export default function UserDashboard() {
   const [stats, setStats] = useState<UserStats | null>(null)
   const [keys, setKeys] = useState<SubApiKey[]>([])
-  const [usageEvents, setUsageEvents] = useState<any[]>([])
+  const [usageEvents, setUsageEvents] = useState<UsageEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)

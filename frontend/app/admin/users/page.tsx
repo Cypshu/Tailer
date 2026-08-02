@@ -149,14 +149,16 @@ export default function UsersPage() {
                     <td className="py-4 px-4 text-center">
                       <div className="flex items-center justify-center gap-2">
                         <button
-                          title="Edit user"
-                          className="text-blue-600 hover:text-blue-800 p-1.5 rounded hover:bg-blue-50 transition-colors"
+                          disabled
+                          title="Edit user (coming soon)"
+                          className="text-gray-400 cursor-not-allowed p-1.5 rounded transition-colors"
                         >
                           <FiEdit2 className="text-lg" />
                         </button>
                         <button
-                          title="Delete user"
-                          className="text-red-600 hover:text-red-800 p-1.5 rounded hover:bg-red-50 transition-colors"
+                          disabled
+                          title="Delete user (coming soon)"
+                          className="text-gray-400 cursor-not-allowed p-1.5 rounded transition-colors"
                         >
                           <FiTrash2 className="text-lg" />
                         </button>

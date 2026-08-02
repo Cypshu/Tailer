@@ -1,7 +1,10 @@
 # Build stage
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
+
+ARG NEXT_PUBLIC_API_URL=http://localhost:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
 # Copy package files
 COPY package.json package-lock.json ./
@@ -16,7 +19,7 @@ COPY . .
 RUN npm run build
 
 # Runtime stage
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 

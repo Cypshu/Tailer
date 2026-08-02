@@ -24,3 +24,18 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+input:not([type="checkbox"]):not([type="radio"]),
+textarea,
+select {
+  color: #111827;
+  background-color: #ffffff;
+  caret-color: #111827;
+  color-scheme: light;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #6b7280;
+  opacity: 1;
+}

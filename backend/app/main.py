@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.api import admin, user, runtime
+from app.api import admin, user, runtime, auth
 
 app = FastAPI(
     title=settings.app_name,
@@ -21,6 +21,7 @@ app.add_middleware(
 )
 
 # Include routers
+app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(user.router)
 app.include_router(runtime.router)

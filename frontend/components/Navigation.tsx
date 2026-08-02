@@ -1,14 +1,20 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import { FiHome, FiUsers, FiKey, FiLogOut } from 'react-icons/fi'
 
 export function Navigation() {
   const pathname = usePathname()
+  const router = useRouter()
 
   const isAdmin = pathname.startsWith('/admin')
   const isUser = pathname.startsWith('/user')
+
+  const handleLogout = () => {
+    localStorage.clear()
+    router.push('/login')
+  }
 
   const adminLinks = [
     { href: '/admin', label: 'Dashboard', icon: FiHome },
@@ -48,17 +54,15 @@ export function Navigation() {
           </div>
 
           <div className="flex items-center gap-4">
-            {isAdmin ? (
-              <button className="text-blue-100 hover:text-white text-sm flex items-center gap-2">
+            {(isAdmin || isUser) && (
+              <button
+                onClick={handleLogout}
+                className="text-blue-100 hover:text-white hover:bg-blue-700 px-3 py-2 rounded-md text-sm flex items-center gap-2 transition-colors"
+              >
                 <FiLogOut />
                 Logout
               </button>
-            ) : isUser ? (
-              <button className="text-blue-100 hover:text-white text-sm flex items-center gap-2">
-                <FiLogOut />
-                Logout
-              </button>
-            ) : null}
+            )}
           </div>
         </div>
       </div>

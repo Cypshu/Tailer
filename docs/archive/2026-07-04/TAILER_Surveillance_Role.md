@@ -1,5 +1,7 @@
 # TAILER Surveillance Role
 
+> Archived coordination instructions from 2026-07-04. Use the root AGENTS.md for current repository rules.
+
 ## Purpose
 
 This file defines the behavior of the TAILER monitoring instance.
@@ -64,14 +66,26 @@ For each future inspection cycle:
 - Treat generated or environment-local directories inside the repo as potential hygiene issues and report them.
 - Respect concurrent work from other agents; inspect first, avoid interference.
 
+## Latest Known State (2026-07-04)
+
+- `Tailer/` remains the active standalone Git repository.
+- `npm run build` passes in `frontend/`.
+- Backend startup and smoke checks pass from `backend/venv` with FastAPI `0.115.0`.
+- Auth, protected admin/user routes, and `POST /v1/chat/completions` pass local smoke checks.
+- Frontend form fields now have global readable text styling in `frontend/app/globals.css`.
+- Database, SQLAlchemy model, and Alembic migration scaffolding exists, but active routes still use `backend/app/mock_data.py`.
+- Persistence wiring, provider credential storage, limits, budgets, pipelines, and automated regression tests remain open.
+
 ## Current Monitoring Focus
 
 The current surveillance focus is:
 
 - verify that `Tailer/` is the true working project root
-- verify that frontend and backend run on the files inside `Tailer/`
+- verify that frontend and backend continue to run on the files inside `Tailer/`
 - compare implementation progress against the implementation plan
+- track MVP gaps between the plan and the actual repo
 - track inconsistencies and deviations without changing code
+- re-check `TAILER_Project_Context.md` whenever `tasks.md` is updated
 
 ## Output Policy
 

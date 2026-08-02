@@ -1,6 +1,5 @@
 from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey, Boolean, JSON
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import declarative_base, relationship
 from datetime import datetime
 import uuid
 

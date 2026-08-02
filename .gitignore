@@ -11,6 +11,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -18,8 +19,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -31,12 +32,16 @@ MANIFEST
 .pytest_cache/
 .coverage
 .mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage.xml
 
 # Node/Frontend
 node_modules/
 npm-debug.log
 npm-error.log
 yarn-error.log
+*.log
 .next/
 out/
 .turbo/
@@ -58,9 +63,12 @@ postgres_data/
 redis_data/
 *.sqlite3
 
-# Docker
-.dockerignore
-
 # Temporary files
 *.tmp
 *.temp
+
+# Generated local validation harnesses
+.tailer-runs/
+
+# claude
+.claude/
