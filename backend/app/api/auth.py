@@ -1,8 +1,10 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+
 from app.auth import create_access_token
-from app.mock_data import MOCK_USERS
 from app.models import NormalizedEmail
+from app.repositories.dependencies import get_service
+from app.services import AuthenticationError, TailerService
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -22,35 +24,18 @@ class LoginResponse(BaseModel):
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(credentials: LoginRequest):
-    """Login with email and password to get access token.
-
-    For MVP: users in mock data use their name as password for testing.
-    """
-    normalized_password = credentials.password.strip()
-
-    # Find user by email
-    user = next((u for u in MOCK_USERS if u.email.lower() == credentials.email), None)
-
-    if not user:
+def login(credentials: LoginRequest, service: TailerService = Depends(get_service)):
+    """Authenticate a dashboard user and return a configured JWT."""
+    try:
+        user = service.authenticate(credentials.email, credentials.password)
+    except AuthenticationError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
+            detail=str(exc),
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from exc
 
-    # For MVP, use name as password (plaintext for testing)
-    # In production, compare hashed passwords
-    if normalized_password != user.name:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Create access token
     access_token = create_access_token(data={"sub": user.id})
-
     return LoginResponse(
         access_token=access_token,
         token_type="bearer",
@@ -62,8 +47,7 @@ async def login(credentials: LoginRequest):
 
 
 @router.post("/refresh")
-async def refresh_token():
-    """Refresh access token (placeholder for future implementation)."""
+def refresh_token():
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         detail="Token refresh not yet implemented",

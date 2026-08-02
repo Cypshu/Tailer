@@ -1,7 +1,9 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api import admin, user, runtime, auth
+from app.repositories.base import UnitOfWorkFactory
+from app.repositories.dependencies import get_uow_factory
 
 app = FastAPI(
     title=settings.app_name,
@@ -39,5 +41,19 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """Process liveness check; it deliberately avoids downstream I/O."""
     return {"status": "healthy"}
+
+
+@app.get("/ready")
+def readiness(factory: UnitOfWorkFactory = Depends(get_uow_factory)):
+    """Report ready only when the configured repository can answer a query."""
+    try:
+        with factory() as uow:
+            uow.projects.get_by_id(settings.default_project_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Persistence backend is unavailable",
+        ) from exc
+    return {"status": "ready"}

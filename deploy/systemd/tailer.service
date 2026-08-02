@@ -1,0 +1,20 @@
+[Unit]
+Description=TAILER Docker Compose stack
+Documentation=file:/opt/tailer/deploy/systemd/README.md
+Wants=network-online.target
+Requires=docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/tailer
+Environment=TAILER_COMPOSE_WAIT_TIMEOUT=600
+ExecStart=/bin/bash /opt/tailer/tailer.sh start
+ExecReload=/bin/bash /opt/tailer/tailer.sh restart
+ExecStop=/bin/bash /opt/tailer/tailer.sh stop
+TimeoutStartSec=infinity
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

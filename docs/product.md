@@ -1,5 +1,14 @@
 # TAILER Product Charter
 
+> Delivery checkpoint (2026-08-02): persistence is complete. The secure-provider
+> implementation and mocked-upstream tests pass, but the iteration remains open
+> until a disposable real OpenAI credential succeeds through the running stack.
+> Persistence, restart durability, encrypted routing, sanitized failure
+> metering, redaction, and log-safety checks now pass; live OpenAI success is the
+> sole remaining Iteration 2 acceptance gap.
+> This charter describes the target product; use the root [task board](../tasks.md)
+> for implemented status.
+
 ## One-sentence description
 
 TAILER turns one upstream LLM provider credential into limited, revocable, monitorable Sub-API access for users, teams, and applications.
@@ -59,7 +68,14 @@ A client is any HTTP-capable program using a Sub-API key. TAILER remains languag
 9. Dashboards must describe implemented behavior truthfully.
 10. Billing is not built until metering is reliable and auditable.
 
-The current prototype violates some of these target invariants; the implementation plan treats them as explicit gaps.
+The current implementation encrypts provider credentials with a versioned
+AES-256-GCM keyring, exposes only metadata through admin APIs, routes configured
+model aliases to the OpenAI Chat Completions adapter, and durably records
+sanitized provider failures with stable error codes. It does not yet enforce
+rate, token, cost, or per-request maximum-token policies, and requests blocked
+before provider I/O are not yet persisted as audit events. The frontend also
+has no provider-management screen. The implementation plan treats these as
+explicit gaps.
 
 ## MVP scope
 
@@ -105,6 +121,11 @@ The MVP succeeds when a new operator can:
 7. observe durable usage;
 8. verify a disallowed or over-budget request never reaches the provider;
 9. revoke the key and see subsequent requests denied.
+
+The current Iteration 2 exit gate corresponds to steps 4-7 with one disposable
+real OpenAI credential. Those paths pass automated tests against a mocked
+upstream, and the configured failure path is durable and sanitized in the live
+Compose stack, but live-provider success is not yet verified.
 
 ## Positioning
 

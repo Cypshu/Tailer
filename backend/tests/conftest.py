@@ -1,13 +1,21 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from alembic import command
+from alembic.config import Config
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-from app import mock_data
+from app.config import settings
+from app.demo_seed import DEMO_RAW_KEYS, build_demo_records, seed_demo_data
+from app.domain import KeyRecord
 from app.main import app
+from app.models_db import SubApiKey
 from app.providers import (
     ChatCompletionChoice,
     ChatCompletionResult,
@@ -16,35 +24,80 @@ from app.providers import (
     MockProvider,
     set_provider,
 )
+from app.repositories.base import UnitOfWorkFactory
+from app.repositories.dependencies import get_uow_factory
+from app.repositories.memory import MemoryStore, MemoryUnitOfWorkFactory
+from app.repositories.sqlalchemy import SqlAlchemyUnitOfWorkFactory
 
 
-_INITIAL_USERS = deepcopy(mock_data.MOCK_USERS)
-_INITIAL_PROJECTS = deepcopy(mock_data.MOCK_PROJECTS)
-_INITIAL_KEYS = deepcopy(mock_data.MOCK_KEYS)
-_INITIAL_USAGE_EVENTS = deepcopy(mock_data.MOCK_USAGE_EVENTS)
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _reset_mock_data() -> None:
-    """Restore list identities as well as their original model values."""
-    mock_data.MOCK_USERS[:] = deepcopy(_INITIAL_USERS)
-    mock_data.MOCK_PROJECTS[:] = deepcopy(_INITIAL_PROJECTS)
-    mock_data.MOCK_KEYS[:] = deepcopy(_INITIAL_KEYS)
-    mock_data.MOCK_USAGE_EVENTS[:] = deepcopy(_INITIAL_USAGE_EVENTS)
+def _alembic_config() -> Config:
+    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
+    return config
 
 
 @pytest.fixture(autouse=True)
 def isolated_application_state() -> Iterator[None]:
-    _reset_mock_data()
+    """Keep FastAPI overrides and the process-global provider isolated per test."""
     app.dependency_overrides.clear()
     set_provider(MockProvider())
     yield
-    _reset_mock_data()
     app.dependency_overrides.clear()
     set_provider(MockProvider())
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def memory_uow_factory() -> MemoryUnitOfWorkFactory:
+    users, projects, keys, usage = build_demo_records(settings.sub_api_key_pepper)
+    return MemoryUnitOfWorkFactory(
+        MemoryStore(users=users, projects=projects, keys=keys, usage=usage)
+    )
+
+
+@pytest.fixture
+def sql_uow_factory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[SqlAlchemyUnitOfWorkFactory]:
+    """Return a seeded adapter backed by a fresh database migrated to head."""
+    database_path = (tmp_path / "tailer-api.db").as_posix()
+    database_url = f"sqlite:///{database_path}"
+    monkeypatch.setenv("TAILER_DATABASE_URL", database_url)
+    command.upgrade(_alembic_config(), "head")
+
+    engine = create_engine(
+        database_url,
+        connect_args={"check_same_thread": False},
+        pool_pre_ping=True,
+    )
+    factory = SqlAlchemyUnitOfWorkFactory(
+        sessionmaker(
+            bind=engine,
+            autocommit=False,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+    )
+    seed_demo_data(factory, settings.sub_api_key_pepper)
+    try:
+        yield factory
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture(params=["memory", "sqlalchemy"], ids=["memory", "sqlalchemy"])
+def uow_factory(request: pytest.FixtureRequest) -> UnitOfWorkFactory:
+    """Exercise every client contract through both persistence adapters."""
+    if request.param == "memory":
+        return request.getfixturevalue("memory_uow_factory")
+    return request.getfixturevalue("sql_uow_factory")
+
+
+@pytest.fixture
+def client(uow_factory: UnitOfWorkFactory) -> Iterator[TestClient]:
+    app.dependency_overrides[get_uow_factory] = lambda: uow_factory
     with TestClient(app) as test_client:
         yield test_client
 
@@ -68,18 +121,51 @@ def user_headers(client: TestClient) -> dict[str, str]:
     return _login_headers(client, "team_alpha@hackathon.dev", "Team Alpha")
 
 
+@dataclass(frozen=True)
+class RuntimeCredential:
+    raw_key: str
+    record: KeyRecord
+
+
 @pytest.fixture
-def active_key():
-    key = mock_data.MOCK_KEYS[0]
-    key.status = "active"
-    key.expires_at = (
-        datetime.now(timezone.utc) + timedelta(days=30)
-    ).isoformat().replace("+00:00", "Z")
-    return key
+def active_key(uow_factory: UnitOfWorkFactory) -> RuntimeCredential:
+    with uow_factory() as uow:
+        key = uow.keys.get_by_id("subkey_1")
+    assert key is not None
+    return RuntimeCredential(raw_key=DEMO_RAW_KEYS[key.id], record=key)
+
+
+@pytest.fixture
+def mutate_key(
+    uow_factory: UnitOfWorkFactory,
+) -> Callable[..., None]:
+    """Change seeded key state through the adapter or its test setup handle."""
+
+    def mutate(key_id: str, **changes: object) -> None:
+        if isinstance(uow_factory, MemoryUnitOfWorkFactory):
+            with uow_factory() as uow:
+                key = uow.keys.get_by_id(key_id)
+                assert key is not None
+                for field, value in changes.items():
+                    setattr(key, field, value)
+                uow.commit()
+            return
+
+        assert isinstance(uow_factory, SqlAlchemyUnitOfWorkFactory)
+        with uow_factory.session_factory() as session:
+            row = session.get(SubApiKey, key_id)
+            assert row is not None
+            for field, value in changes.items():
+                setattr(row, field, value)
+            session.commit()
+
+    return mutate
 
 
 class RecordingProvider:
     """Deterministic provider spy used to prove boundary and state behavior."""
+
+    name = "recording"
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []

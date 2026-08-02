@@ -4,273 +4,246 @@ Last reconciled: 2026-08-02
 
 ## Purpose and source-of-truth rules
 
-This file defines delivery order and acceptance gates. It is not evidence that a feature exists.
+This file defines delivery order and acceptance gates. It is not evidence that
+a feature exists.
 
 - Code and executable tests define behavior.
 - `tasks.md` is the active execution queue.
 - This plan defines iteration boundaries.
-- `docs/architecture.md` defines the target shape.
+- `docs/architecture.md` defines current and target shape.
 - `docs/product.md` defines product scope.
 - `docs/archive/` contains historical snapshots only.
 
 ## Product outcome
 
-The MVP is a secure gateway in which an admin can configure one project and one real LLM provider credential, create limited Sub-API keys, route OpenAI-compatible requests, enforce permissions and budgets before provider calls, and inspect durable usage.
+The MVP is a secure gateway in which an admin can configure one project and one
+real LLM provider credential, create limited Sub-API keys, route
+OpenAI-compatible requests, enforce permissions and budgets before provider
+calls, and inspect durable usage.
 
-## Verified baseline
+## Verified current baseline
 
-Verified on 2026-08-02 from local `main` at commit `d08d5b9` plus an existing dirty worktree:
+Verified on 2026-08-02 in the Iteration 2 working tree:
 
-### Passing
+### Application and tests
 
-- Frontend lint and production build
-- Backend 48-test suite in normal and reversed file order
-- Backend live smoke path:
-  - health
-  - admin and user login
-  - admin RBAC success
-  - user-to-admin denial
-  - user identity
-  - valid runtime request
-  - invalid runtime key denial
-- Docker Compose configuration rendering
-- Alembic head discovery and offline upgrade SQL generation
-- Disposable SQLite migration upgrade/downgrade/re-upgrade and schema-drift check
+- Frontend lint and production build pass.
+- The 182-case backend suite passes in normal and reversed file order.
+- API characterization runs through both the copy-on-write memory adapter and a
+  fresh Alembic-migrated SQLAlchemy/SQLite adapter.
+- PostgreSQL is the default runtime adapter for active auth, admin, user,
+  runtime-key, and usage behavior.
+- Passwords are hashed; JWT login/RBAC and configured signing/lifetime work.
+- Generated Sub-API keys are HMAC-SHA-256 digests at rest and raw only in the
+  creation response. Later API reads and frontend state expose a safe display
+  fragment only.
+- Active, expiry, project-state, and allowed-model checks occur before provider
+  invocation.
+- Versioned AES-256-GCM provider credentials and model aliases persist behind
+  metadata-only admin APIs. Master-key values are redacted by settings objects.
+- The OpenAI Chat Completions adapter uses backend-only credentials, configured
+  provider model/pricing, HTTPS, and sanitized typed errors.
+- Successful calls and normalized provider failures record durable usage; no
+  database transaction remains open during provider I/O.
 
-### Implemented but development-only
+### Database and runtime
 
-- JWT dashboard authentication over mock users
-- Admin/user route protection
-- In-memory user and key creation/revocation
-- Raw Sub-API-key lookup with active, expiry, and allowed-model checks
-- Mock provider completion
-- In-memory successful-request usage append
-- SQLAlchemy/Alembic scaffold with no active route consumers
+- Alembic revision `0003` passes drift detection, SQLite upgrade/downgrade/
+  re-upgrade, scoped credential-FK inspection, legacy-null backfill, and a clean
+  PostgreSQL 16 upgrade/check/downgrade/re-upgrade.
+- Two simultaneous seed processes against a fresh PostgreSQL database both
+  succeed and converge to the deterministic record counts.
+- `tailer.cmd start` and `tailer.cmd restart` build the stack and leave
+  PostgreSQL, Redis, backend, and frontend healthy.
+- Liveness, persistence readiness, frontend access, and admin login pass.
+- A created user, revoked key, and usage event survive a complete controller
+  restart; the acceptance records were removed afterward.
+- Concurrent duplicate-user requests return one success and one 409 conflict.
+- SQL echo is disabled by default; acceptance logs contain no raw keys or probe
+  identity data.
+- A live encrypted credential/model route reached the real OpenAI adapter
+  boundary against a deliberately unavailable HTTPS target. Its sanitized
+  failure and stable error code survived restart; ciphertext-at-rest and log
+  redaction checks passed, and every probe row was removed.
 
-### Not verified or not implemented
+### Operator surface
 
-- Online PostgreSQL Alembic upgrade/downgrade was not verified because neither Docker nor a local PostgreSQL server was available.
-- Full Compose startup was not verified because the Docker daemon was unavailable.
-- Active routes are not persistence-backed.
-- Request count, token, budget, and per-key max-token policy are not enforced.
-- Raw Sub-API keys are returned by read APIs.
-- Only successful runtime calls create usage events.
-- No real provider or provider credential encryption exists.
+- `tailer.cmd` provides an interactive Windows menu and command mode.
+- `tailer.sh` provides Unix start, stop, restart, status, logs, configuration,
+  and help commands.
+- `deploy/systemd/tailer.service` delegates boot lifecycle to `tailer.sh` for a
+  rootful Docker host installed at `/opt/tailer`.
+- Windows and Bash controller checks passed. The unit still needs one live
+  installation check on a real systemd/cgroup host; WSL1 could support only a
+  structural review.
+
+## Current limitations
+
+- The OpenAI adapter and encrypted credential route are implemented, but a
+  successful call with a disposable real OpenAI credential has not been run in
+  this environment. The final running stack intentionally has no credential
+  keyring configured and therefore fails credential creation closed.
+- Demo passwords, deterministic demo bearer keys, and example secrets make the
+  current system development-only.
+- Request-rate, request-count, token, budget, and per-key maximum-token policies
+  are not enforced; Redis is not yet consumed by application code.
+- Provider failures are durable. TAILER policy-blocked calls and TAILER-enforced
+  rate-limit outcomes are not yet implemented.
+- Refresh sessions, key rotation workflow, secure password administration,
+  HTTPS, backups, and production secret management remain incomplete.
 
 ## Canonical MVP contract decisions
-
-These decisions remove conflicts in older planning documents:
 
 - Dashboard auth API: `/api/auth/*`.
 - Admin API: `/admin/*`.
 - User API: `/user/*`.
 - Runtime API: `/v1/chat/completions`.
-- Core persisted tables: `users`, `projects`, `sub_api_keys`, and `usage_events`.
-- Add `provider_credentials` and `model_configs` only in the secure-provider slice.
-- Do not add organizations to the first MVP; one deployment may host one project initially.
-- Preserve current response shapes during persistence work unless a versioned contract change is approved.
-- A raw Sub-API key may appear only in its creation response after the security slice.
-- Pipelines, multi-organization tenancy, billing, and advanced analytics are deferred until the core gateway is durable and policy-enforced.
+- Core persisted tables: `users`, `projects`, `provider_credentials`,
+  `model_configs`, `sub_api_keys`, and `usage_events`.
+- Do not add organizations to the first MVP; one deployment hosts one configured
+  project initially.
+- A raw Sub-API key appears only in its creation response. It is never returned
+  by list/detail APIs, reconstructed, logged, or persisted.
+- Pipelines, multi-organization tenancy, billing, and advanced analytics remain
+  deferred until the durable gateway is policy-enforced.
 
-## Iteration 0 — Reproducible API contract (implemented)
+## Iteration 0 — reproducible API contract
 
-Status: implementation complete on 2026-08-02. PostgreSQL and full Compose runtime verification remain recorded external blockers; the next executable task is Task 4 in `tasks.md`.
+Status: complete on 2026-08-02.
 
-Goal: protect the existing useful behavior with deterministic tests, then harden invalid boundaries before persistence changes.
+Goal: characterize useful behavior, harden invalid boundaries, and make the
+migration/runtime scaffold executable before persistence cutover.
 
-### I0.1 Repository and documentation hygiene
+Delivered:
 
-Status: completed in the 2026-08-02 preparation pass.
+- repository/documentation hygiene and a clear active-doc hierarchy;
+- deterministic login, RBAC, user, admin, runtime, and migration tests;
+- normalized/validated request boundaries and authoritative JWT settings;
+- provider forwarding, measured latency, and invalid-metering rejection;
+- environment-driven Alembic configuration;
+- healthy Compose dependency sequencing and Docker/PostgreSQL verification.
 
-Outcomes:
+Exit gate: passed. Earlier Docker and PostgreSQL blockers were cleared on
+2026-08-02.
 
-- Active docs were reduced to a clear hierarchy.
-- Stale reports were moved under `docs/archive/`.
-- Generated run output is ignored.
-- Docker build contexts exclude local dependencies and caches.
-- The unused frontend mock-data duplicate was removed.
-- Registered unmerged Git worktrees were preserved.
+## Iteration 1 — persistence vertical slice
 
-### I0.2 Backend characterization suite
+Status: complete on 2026-08-02.
 
-Status: completed.
+Goal: replace direct global-list access with a durable repository boundary while
+preserving tested API behavior.
 
-Create:
+Delivered:
 
-- `backend/requirements-dev.txt`
-- `backend/tests/conftest.py`
-- `backend/tests/test_auth.py`
-- `backend/tests/test_admin.py`
-- `backend/tests/test_runtime.py`
-- `backend/tests/test_migrations.py`
+1. Frozen API/domain/ORM mapping for default project, usage aliases, provider
+   metadata, key secrecy, seeding, and transaction ownership.
+2. Focused user, project, key, and usage repository protocols plus application
+   services and an explicit unit of work.
+3. Serialized copy-on-write memory adapter with detached records, explicit
+   commit/rollback, and constant-time digest comparison.
+4. SQLAlchemy adapter with one Session per operation and persistence-conflict
+   translation.
+5. Alembic revision `0002` for schema/contract alignment and legacy backfills.
+6. Deterministic, collision-aware, concurrent-safe, idempotent seed.
+7. Full route cutover for auth, admin/user reads and writes, runtime HMAC lookup,
+   and durable usage.
+8. High-entropy HMAC-at-rest/show-once Sub-API keys and matching frontend flow.
+9. Repository readiness health, non-reloading container startup, and quiet SQL
+   logs by default.
+10. Cross-adapter, migration, transaction, concurrency, secrecy, and restart
+    durability evidence.
 
-Required coverage:
+Exit gate result:
 
-- valid and invalid login
-- anonymous admin request returns 401
-- normal user admin request returns 403
-- authenticated `/user/me` identity
-- valid Sub-API key completion
-- invalid, revoked, and model-forbidden key paths
-- one usage event added after success
-- no success event added after rejected pre-provider requests
-- fixture reset makes tests order-independent
+- no active route imports `MOCK_*` or `app.mock_data`;
+- clean databases migrate and seed idempotently under concurrent startup;
+- contract tests pass through both adapters;
+- user/key mutations, revocation, and usage survive restart;
+- normal read APIs, persistence, and logs contain no raw Sub-API key;
+- transaction and rollback behavior is executable and documented.
 
-Use FastAPI `TestClient` with `httpx`. Do not promote a live `requests` demo as the regression layer.
+Gate: passed.
 
-Result: 48 tests pass without live services in both normal and reversed file order. Fixtures restore mutable mock and provider state for each test.
+## Iteration 2 — secure real-provider gateway (acceptance pending)
 
-### I0.3 Boundary and configuration hardening
+Status: implementation complete on 2026-08-02; one external live-success gate
+remains open.
 
-Status: completed.
+Goal: route one real provider safely without exposing its credential.
 
-Implement and test:
+Delivered:
 
-- valid normalized email and duplicate-email conflict
-- existing key owner requirement
-- non-empty allowed-model list
-- positive request/token/budget limits
-- typed future expiration
-- non-empty typed chat messages
-- positive `max_tokens` and bounded temperature
-- expiration rejection before provider invocation
-- real latency measurement
-- forwarding of supported request fields
-- `jwt_secret_key`, `jwt_algorithm`, and `jwt_expiration_minutes` as authoritative settings
+1. Versioned AES-256-GCM credential encryption with a redacted external keyring,
+   active key version, rotation primitive, and AAD bound to credential, project,
+   provider, and key version.
+2. `provider_credentials` and `model_configs` repository/ORM persistence plus
+   Alembic revision `0003` and a scoped composite credential foreign key.
+3. Metadata-only admin create/list/revoke credential APIs and create/list/disable
+   model-configuration APIs.
+4. Public model-alias resolution to an active credential, provider model, and
+   exact per-million-token EUR pricing.
+5. An HTTPS OpenAI Chat Completions adapter behind the provider boundary while
+   retaining deterministic `MockProvider` injection.
+6. Sanitized timeout, connectivity, authentication, permission, not-found,
+   rate-limit, rejected-request, and invalid-response failures.
+7. Separate durable success/failure usage transactions with stable error codes.
+8. Cross-adapter encryption, redaction, routing, adapter, failure, transaction,
+   migration, deterministic-mock, HTTPS, and log-safety tests plus an
+   environment-only operator smoke procedure.
 
-Do not redesign raw-key persistence in this slice.
+Exit gate result:
 
-Result: request/admin boundaries return tested 4xx responses, expiry/model checks occur before provider access, provider options and measured latency are recorded, invalid metering cannot create a success event, and JWT settings are authoritative.
+- passed: database, API, frontend payloads, and logs contain no raw provider or
+  Sub-API secret;
+- pending: one configured completion against the real OpenAI service, because no
+  disposable provider credential was available;
+- passed: provider errors are normalized and durable;
+- passed: `MockProvider` remains deterministic for tests;
+- passed: all earlier regression, migration, Compose, and restart gates remain
+  green.
 
-### I0.4 Migration and startup readiness
+Task 7 and this iteration remain open only for the disposable live OpenAI
+success smoke. Do not start the policy iteration by treating mocked-upstream or
+unavailable-upstream evidence as that success.
 
-Status: implementation complete; Docker-backed verification blocked by the unavailable daemon.
+The Sub-API-key HMAC/show-once work formerly scheduled here was pulled forward
+and completed in Iteration 1.
 
-Implement and verify:
-
-- Alembic reads the configured database URL rather than a hardcoded URL.
-- A clean PostgreSQL database can run upgrade, downgrade, and upgrade.
-- Setup docs state exact local and Docker commands.
-- Full Compose startup reaches a healthy backend and usable frontend.
-- Validation evidence records date, command, and environment.
-
-Result: Alembic reads `TAILER_DATABASE_URL`; offline SQL and a disposable SQLite round-trip/drift check pass. Compose rendering passes and all services now have health sequencing. A clean PostgreSQL round-trip and full startup remain unverified until Docker is available.
-
-### Iteration 0 exit gate
-
-- `python -m pytest` passes without a live PostgreSQL, Redis, or backend process.
-- Tests are repeatable in any order.
-- Invalid payloads cannot create negative or successful usage.
-- `npm run lint` and `npm run build` pass.
-- `docker compose config --quiet` passes without obsolete configuration warnings.
-- Online migration round-trip and Compose startup are either verified or recorded with a concrete external blocker.
-- Active docs describe only verified behavior.
-
-Gate result: passed under the explicit concrete-external-blocker clause. Task 6 remains gated on completing PostgreSQL and Compose runtime verification.
-
-### Iteration 0 non-goals
-
-- Postgres route conversion
-- raw-key lifecycle redesign
-- provider credential storage
-- real upstream provider
-- Redis quotas
-- frontend component tests
-
-## Iteration 1 — Persistence vertical slice (next)
-
-Status: ready for the Task 4 design pass.
-
-Goal: replace direct global-list access while preserving the tested API contract.
-
-### Design prerequisites
-
-Resolve these mappings explicitly before coding:
-
-- API `SubApiKey.key` versus ORM `key_hash` and `key_prefix`
-- API keys without `project_id` versus the ORM-required project relation
-- API usage `timestamp` and `sub_key_id` versus ORM `created_at` and `sub_api_key_id`
-- ORM-required usage `project_id` and `provider`
-- idempotent demo seed behavior
-- transaction ownership and session lifetime
-
-### Delivery sequence
-
-1. Record the agreed schema/API mapping in `docs/architecture.md`.
-2. Add repository interfaces for users, keys, projects, and usage.
-3. Add an in-memory adapter and move routes behind it first.
-4. Add a SQLAlchemy adapter and idempotent demo seed.
-5. Cut over auth, then admin/user reads, admin writes, runtime key lookup, and usage writes one vertical slice at a time.
-6. Add restart-durability integration tests.
-
-### Exit gate
-
-- No active route imports `MOCK_USERS`, `MOCK_KEYS`, or `MOCK_USAGE_EVENTS` directly.
-- A clean database can be migrated and seeded idempotently.
-- Existing API contract tests pass against both in-memory and PostgreSQL adapters.
-- User/key mutations and usage survive backend restart.
-- Rollback behavior is documented.
-
-## Iteration 2 — Secure real-provider gateway
-
-Goal: route one real provider safely.
-
-Deliverables:
-
-- encrypted provider credential model and service
-- create/list/delete admin endpoints that never return raw provider secrets
-- cryptographically random Sub-API keys
-- key hash and prefix storage
-- full key shown only in the creation response
-- constant-time key verification
-- one configured real provider adapter behind the existing boundary
-- normalized provider errors and token usage
-- durable success and failure usage events
-
-Exit gate:
-
-- Database and logs contain no raw provider or Sub-API secrets.
-- A normal key read returns prefix/metadata only.
-- A configured provider call succeeds through the gateway.
-- Provider errors are metered without leaking secrets.
-- The mock provider remains available for tests.
-
-## Iteration 3 — Enforced policy
+## Iteration 3 — enforced policy
 
 Goal: prevent unauthorized spend before provider calls.
 
 Delivery order:
 
-1. Key status and expiration
-2. Configured model aliases and per-key allow lists
-3. Max tokens per request
-4. Per-minute and daily request limits
-5. Token and cost budgets
-6. Redis counters with PostgreSQL as durable truth
+1. Configured model aliases and per-key allow lists
+2. Max tokens per request
+3. Per-minute and daily request limits
+4. Token and cost budgets
+5. Redis atomic counters with PostgreSQL as durable truth
+6. Durable blocked and rate-limited audit events
 
 Exit gate:
 
-- Every denial has a stable error code.
-- Tests prove the provider is not called for denied requests.
-- Concurrent requests cannot trivially bypass limits.
-- Admin and user usage views reflect blocked and failed events.
+- every denial has a stable error code;
+- tests prove the provider is not called for denied requests;
+- concurrent requests cannot trivially bypass limits;
+- admin and user views reflect success, failure, blocked, and rate-limited
+  outcomes.
 
-## Iteration 4 — Product surface and delivery
+## Iteration 4 — product surface and delivery
 
 Deliverables:
 
-- project management
-- provider and model configuration UI
-- truthful key creation/show-once flow
-- user integration examples and allowed-model view
-- admin usage/error views
-- CSV export
-- production configuration, HTTPS plan, backups, and logging
-- deployment and operator documentation
+- project/provider/model management UI;
+- user integration examples and allowed-model view;
+- admin usage/error views and CSV export;
+- key/provider rotation workflows;
+- production validation, HTTPS, backup/restore, structured logs, and monitoring;
+- live systemd-host verification and complete operator runbook.
 
-Exit gate:
-
-A new operator can deploy one project, add one provider credential, issue a safe Sub-API key, make a real completion, observe durable usage, enforce a limit, and revoke access.
+Exit gate: a new operator can deploy one project, add one provider credential,
+issue a safe Sub-API key, make a real completion, observe durable usage, enforce
+a limit, revoke access, and recover the service from a documented backup.
 
 ## Deferred
 
@@ -286,14 +259,14 @@ Do not schedule these before Iteration 4 exits:
 
 ## MVP definition of done
 
-The MVP is complete when all of the following are demonstrated by tests or an operator runbook:
+The MVP is complete when tests or an operator runbook demonstrate:
 
-- Admin authentication and authorization
-- One persisted project and provider credential
-- Hash-at-rest, show-once Sub-API-key lifecycle
-- One real-provider completion through `/v1/chat/completions`
-- Model and spend policy enforced before the provider call
-- Durable success, failure, and blocked usage events
-- Admin and user usage visibility
-- Key revocation
-- Repeatable local deployment and migration flow
+- admin authentication and authorization;
+- one persisted project and encrypted provider credential;
+- hash-at-rest, show-once Sub-API-key lifecycle;
+- one real-provider completion through `/v1/chat/completions`;
+- model and spend policy enforced before provider invocation;
+- durable success, failure, blocked, and rate-limited usage/audit events;
+- admin and user usage visibility;
+- key revocation and credential rotation;
+- repeatable deployment, migration, backup, restore, and secret handling.

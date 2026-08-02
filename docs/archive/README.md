@@ -2,6 +2,8 @@
 
 This directory preserves historical project notes. Archived files are not active specifications, test evidence, or task assignments.
 
+Current checkpoint (2026-08-02): the persistence iteration and secure-provider implementation are complete; a disposable live OpenAI success smoke remains pending. Use the root [task board](../../tasks.md) for live status.
+
 The 2026-07-04 snapshot contains:
 
 - an authentication implementation summary

@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,12 +14,19 @@ class Settings(BaseSettings):
 
     # Core application settings
     app_name: str = "TAILER"
-    debug: bool = True
+    debug: bool = False
     backend_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:3000"
 
     # Database configuration
     database_url: str = "postgresql://tailer_user:tailer_password@localhost:5432/tailer"
+    repository_backend: Literal["memory", "sqlalchemy"] = "sqlalchemy"
+    default_project_id: str = "proj_hackathon_2026"
+    default_provider: str = "mock"
+
+    # Provider routing
+    openai_base_url: str = "https://api.openai.com/v1"
+    provider_timeout_seconds: float = Field(default=30.0, gt=0)
 
     # Redis configuration
     redis_url: str = "redis://localhost:6379"
@@ -29,6 +36,9 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "your-jwt-secret-key-change-in-production"
     jwt_algorithm: str = "HS256"
     jwt_expiration_minutes: int = 30
+    sub_api_key_pepper: str = "development-sub-api-key-pepper-change-in-production"
+    credential_encryption_keys: dict[str, SecretStr] = Field(default_factory=dict)
+    credential_active_key_version: str = "v1"
 
     @field_validator("debug", mode="before")
     @classmethod

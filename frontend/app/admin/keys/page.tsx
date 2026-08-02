@@ -1,8 +1,8 @@
 'use client'
 
 import { Card } from '@/components/Card'
-import { api } from '@/lib/api'
-import { FiCopy, FiRotateCw, FiTrash2, FiPlus, FiEye, FiEyeOff, FiX } from 'react-icons/fi'
+import { api, type CreatedSubApiKey, type SubApiKey } from '@/lib/api'
+import { FiCopy, FiRotateCw, FiTrash2, FiPlus, FiX } from 'react-icons/fi'
 import { useState, useEffect } from 'react'
 
 interface User {
@@ -13,23 +13,12 @@ interface User {
   created_at: string
 }
 
-interface SubApiKey {
-  id: string
-  name: string
-  key: string
-  owner_id: string
-  status: string
-  daily_request_limit?: number
-  monthly_token_limit?: number
-  monthly_budget_eur?: number
-  allowed_models?: string[]
-}
-
 export default function KeysPage() {
   const [keys, setKeys] = useState<SubApiKey[]>([])
   const [users, setUsers] = useState<User[]>([])
-  const [revealedKey, setRevealedKey] = useState<string | null>(null)
-  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
+  const [createdKey, setCreatedKey] = useState<CreatedSubApiKey | null>(null)
+  const [createdKeyCopied, setCreatedKeyCopied] = useState(false)
+  const [copyError, setCopyError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [showForm, setShowForm] = useState(false)
@@ -83,7 +72,11 @@ export default function KeysPage() {
         monthly_budget_eur: formData.monthly_budget_eur,
         expires_at: formData.expires_at,
       })
-      setKeys([...keys, newKey])
+      const { key: rawKey, ...keyMetadata } = newKey
+      setKeys((currentKeys) => [...currentKeys, keyMetadata])
+      setCreatedKey({ ...keyMetadata, key: rawKey })
+      setCreatedKeyCopied(false)
+      setCopyError(null)
       setFormData({
         name: '',
         owner_user_id: '',
@@ -94,8 +87,6 @@ export default function KeysPage() {
         expires_at: new Date(new Date().getFullYear() + 1, 11, 31).toISOString().split('T')[0],
       })
       setShowForm(false)
-      setSuccessMessage(`Key "${newKey.name}" created successfully!`)
-      setTimeout(() => setSuccessMessage(null), 3000)
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'Failed to create key')
     } finally {
@@ -119,17 +110,17 @@ export default function KeysPage() {
     }
   }
 
-  const handleCopyKey = (key: string) => {
-    navigator.clipboard.writeText(key).then(() => {
-      setCopiedKeyId(Math.random().toString())
-      setTimeout(() => setCopiedKeyId(null), 2000)
-    })
-  }
+  const handleCopyCreatedKey = async () => {
+    if (!createdKey) return
 
-  const maskKey = (key: string) => {
-    const start = key.substring(0, 10)
-    const end = key.substring(key.length - 5)
-    return `${start}...${end}`
+    try {
+      await navigator.clipboard.writeText(createdKey.key)
+      setCreatedKeyCopied(true)
+      setCopyError(null)
+    } catch {
+      setCreatedKeyCopied(false)
+      setCopyError('Could not copy automatically. Select the key and copy it manually.')
+    }
   }
 
   if (loading) {
@@ -155,6 +146,68 @@ export default function KeysPage() {
       {successMessage && (
         <div className="mb-4 bg-green-50 border border-green-200 rounded-lg p-4">
           <p className="text-green-800">{successMessage}</p>
+        </div>
+      )}
+
+      {createdKey && (
+        <div
+          role="alert"
+          className="mb-6 rounded-lg border-2 border-amber-300 bg-amber-50 p-5"
+        >
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-semibold text-amber-950">
+                Save this Sub-API key now
+              </h2>
+              <p className="mt-1 text-sm text-amber-900">
+                This is the only time the full key will be shown. Store it securely before
+                dismissing this message.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setCreatedKey(null)
+                setCreatedKeyCopied(false)
+                setCopyError(null)
+              }}
+              className="shrink-0 text-amber-800 hover:text-amber-950"
+              aria-label="Dismiss newly created key"
+              title="Dismiss"
+            >
+              <FiX className="text-xl" />
+            </button>
+          </div>
+
+          <div className="mt-4 flex flex-col gap-3 rounded-lg border border-amber-200 bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
+            <code className="select-all break-all font-mono text-sm text-gray-900">
+              {createdKey.key}
+            </code>
+            <button
+              type="button"
+              onClick={handleCopyCreatedKey}
+              className={`flex shrink-0 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                createdKeyCopied
+                  ? 'bg-green-100 text-green-700'
+                  : 'bg-blue-600 text-white hover:bg-blue-700'
+              }`}
+            >
+              <FiCopy /> {createdKeyCopied ? 'Copied' : 'Copy key'}
+            </button>
+          </div>
+
+          {copyError && <p className="mt-2 text-sm text-red-700">{copyError}</p>}
+          <button
+            type="button"
+            onClick={() => {
+              setCreatedKey(null)
+              setCreatedKeyCopied(false)
+              setCopyError(null)
+            }}
+            className="mt-4 text-sm font-semibold text-amber-900 underline underline-offset-2 hover:text-amber-950"
+          >
+            I have saved the key — dismiss
+          </button>
         </div>
       )}
 
@@ -286,7 +339,6 @@ export default function KeysPage() {
       <div className="space-y-4">
         {keys.map((key) => {
           const owner = users.find((u) => u.id === key.owner_id)
-          const isRevealed = revealedKey === key.id
 
           return (
             <Card key={key.id}>
@@ -309,28 +361,14 @@ export default function KeysPage() {
               </div>
 
               {/* Key Display */}
-              <div className="bg-gray-100 rounded-lg p-3 mb-4 flex items-center justify-between gap-2">
-                <code className="font-mono text-sm text-gray-700 break-all">
-                  {isRevealed ? key.key : maskKey(key.key)}
+              <div className="mb-4 rounded-lg bg-gray-100 p-3">
+                <p className="mb-1 text-xs font-medium uppercase text-gray-600">Key prefix</p>
+                <code className="break-all font-mono text-sm text-gray-700">
+                  {key.key_prefix}
                 </code>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setRevealedKey(isRevealed ? null : key.id)}
-                    className="text-gray-600 hover:text-gray-900 p-1.5 rounded hover:bg-gray-200 transition-colors"
-                    title={isRevealed ? 'Hide' : 'Show'}
-                  >
-                    {isRevealed ? <FiEyeOff /> : <FiEye />}
-                  </button>
-                  <button
-                    onClick={() => handleCopyKey(key.key)}
-                    className={`p-1.5 rounded transition-colors ${
-                      copiedKeyId ? 'text-green-600 bg-green-100' : 'text-gray-600 hover:text-gray-900 hover:bg-gray-200'
-                    }`}
-                    title={copiedKeyId ? 'Copied!' : 'Copy to clipboard'}
-                  >
-                    <FiCopy />
-                  </button>
-                </div>
+                <p className="mt-1 text-xs text-gray-500">
+                  The full key is available only when it is created.
+                </p>
               </div>
 
               {/* Configuration */}

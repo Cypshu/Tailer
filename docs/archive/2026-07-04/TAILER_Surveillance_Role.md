@@ -1,6 +1,8 @@
 # TAILER Surveillance Role
 
 > Archived coordination instructions from 2026-07-04. Use the root AGENTS.md for current repository rules.
+>
+> Current checkpoint (2026-08-02): Iteration 1 persistence is complete and Iteration 2 implementation is complete; a disposable live OpenAI success smoke remains pending. See the root [task board](../../../tasks.md).
 
 ## Purpose
 

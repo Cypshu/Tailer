@@ -16,6 +16,25 @@ interface ChatCompletionPayload {
   temperature?: number
 }
 
+export interface SubApiKey {
+  id: string
+  name: string
+  key_prefix: string
+  owner_id: string
+  allowed_models: string[]
+  status: 'active' | 'paused' | 'revoked' | 'expired'
+  daily_request_limit: number
+  monthly_token_limit: number
+  monthly_budget_eur: number
+  created_at: string
+  expires_at: string
+}
+
+export interface CreatedSubApiKey extends SubApiKey {
+  /** Returned only by POST /admin/keys and never by list/detail endpoints. */
+  key: string
+}
+
 function getAuthHeaders(): Record<string, string> {
   // Only available in browser
   if (typeof window === 'undefined') return {}
@@ -79,8 +98,9 @@ export const api = {
     getDashboardStats: () => apiCall('/admin/dashboard/stats'),
     getUsers: () => apiCall('/admin/users'),
     getUser: (userId: string) => apiCall(`/admin/users/${userId}`),
-    getKeys: () => apiCall('/admin/keys'),
-    getKey: (keyId: string) => apiCall(`/admin/keys/${keyId}`),
+    getKeys: () => apiCall('/admin/keys') as Promise<SubApiKey[]>,
+    getKey: (keyId: string) =>
+      apiCall(`/admin/keys/${keyId}`) as Promise<SubApiKey>,
     getUsage: (params?: ApiQueryParams) =>
       apiCall('/admin/usage', { params: params || {} }),
 
@@ -106,7 +126,7 @@ export const api = {
       apiCall('/admin/keys', {
         method: 'POST',
         body: JSON.stringify(keyData),
-      }),
+      }) as Promise<CreatedSubApiKey>,
     revokeKey: (keyId: string) =>
       apiCall(`/admin/keys/${keyId}`, { method: 'DELETE' }),
   },
@@ -114,8 +134,9 @@ export const api = {
   // User endpoints
   user: {
     getCurrentUser: () => apiCall('/user/me'),
-    getMyKeys: () => apiCall('/user/keys'),
-    getKey: (keyId: string) => apiCall(`/user/keys/${keyId}`),
+    getMyKeys: () => apiCall('/user/keys') as Promise<SubApiKey[]>,
+    getKey: (keyId: string) =>
+      apiCall(`/user/keys/${keyId}`) as Promise<SubApiKey>,
     getMyUsage: (params?: ApiQueryParams) =>
       apiCall('/user/usage', { params: params || {} }),
     getStats: () => apiCall('/user/stats'),

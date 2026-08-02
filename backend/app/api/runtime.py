@@ -1,37 +1,27 @@
 from datetime import datetime, timezone
+from decimal import Decimal
 import math
 from time import perf_counter
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from starlette.concurrency import run_in_threadpool
 
+from app.domain import UsageRecord
 from app.models import ChatCompletionRequest, ChatCompletionResponse
-from app.mock_data import MOCK_KEYS, MOCK_USAGE_EVENTS, UsageEvent
-from app.providers import get_provider
+from app.providers import ProviderError
+from app.repositories.dependencies import get_service
+from app.services import (
+    AuthenticationError,
+    AuthorizationError,
+    ConfigurationError,
+    TailerService,
+)
 
 router = APIRouter(tags=["runtime"])
 
 
-def _is_expired(expires_at: str | datetime) -> bool:
-    """Return whether a key expiry is at or before the current UTC time.
-
-    Existing mock records store ISO-8601 strings. Accepting ``datetime`` as well
-    keeps this boundary compatible with the typed request/model hardening.
-    Invalid timestamps fail closed at the call site.
-    """
-    if isinstance(expires_at, datetime):
-        expiration = expires_at
-    else:
-        expiration = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-
-    if expiration.tzinfo is None:
-        expiration = expiration.replace(tzinfo=timezone.utc)
-
-    return expiration.astimezone(timezone.utc) <= datetime.now(timezone.utc)
-
-
 def _validate_usage_values(*values: int | float) -> None:
-    """Reject invalid provider metering before it reaches the usage ledger."""
     if any(
         not isinstance(value, (int, float))
         or isinstance(value, bool)
@@ -46,7 +36,6 @@ def _validate_usage_values(*values: int | float) -> None:
 
 
 def _provider_messages(messages: list[object]) -> list[dict]:
-    """Serialize validated API messages at the provider boundary."""
     return [
         message.copy()
         if isinstance(message, dict)
@@ -59,59 +48,84 @@ def _provider_messages(messages: list[object]) -> list[dict]:
 async def chat_completions(
     request: ChatCompletionRequest,
     authorization: str | None = Header(default=None, alias="Authorization"),
+    service: TailerService = Depends(get_service),
 ):
-    """OpenAI-compatible chat completions endpoint.
-
-    Validates Sub-API keys and delegates to the configured provider for actual completions.
-    """
-
-    # Extract and validate key from Authorization header
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid authorization header",
         )
-
-    key_str = authorization.replace("Bearer ", "").strip()
-
-    # Look up key (do NOT return raw key to client)
-    key = next((k for k in MOCK_KEYS if k.key == key_str and k.status == "active"), None)
-    if not key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or inactive API key",
+    raw_key = authorization.removeprefix("Bearer ").strip()
+    try:
+        key = await run_in_threadpool(
+            service.authorize_runtime_key,
+            raw_key,
+            request.model,
         )
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     try:
-        key_is_expired = _is_expired(key.expires_at)
-    except (AttributeError, TypeError, ValueError):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or inactive API key",
-        ) from None
-
-    if key_is_expired:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key has expired",
+        route = await run_in_threadpool(
+            service.resolve_runtime_provider,
+            key,
+            request.model,
         )
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    # Validate model is allowed for this key
-    if request.model not in key.allowed_models:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Model {request.model} not allowed for this key",
-        )
-
-    # Get provider and call it
-    provider = get_provider()
+    provider = route.provider
     started_at = perf_counter()
-    provider_result = await provider.chat_completions(
-        messages=_provider_messages(request.messages),
-        model=request.model,
-        max_tokens=request.max_tokens,
-        temperature=request.temperature,
-    )
+    try:
+        provider_result = await provider.chat_completions(
+            messages=_provider_messages(request.messages),
+            model=route.provider_model,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+        )
+    except ProviderError as exc:
+        latency_ms = max(0, round((perf_counter() - started_at) * 1000))
+        failure = UsageRecord(
+            id=f"usage_{uuid.uuid4().hex[:12]}",
+            project_id=key.project_id,
+            sub_api_key_id=key.id,
+            user_id=key.owner_id,
+            provider=route.provider_name,
+            model=request.model,
+            provider_model=route.provider_model,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            estimated_cost_eur=Decimal("0"),
+            currency="EUR",
+            latency_ms=latency_ms,
+            status=(
+                "rate_limited"
+                if exc.code == "provider_rate_limited"
+                else "failed"
+            ),
+            created_at=datetime.now(timezone.utc),
+            error_code=exc.code,
+        )
+        try:
+            await run_in_threadpool(service.record_usage, failure)
+        except ConfigurationError as persistence_error:
+            raise HTTPException(
+                status_code=503,
+                detail=str(persistence_error),
+            ) from persistence_error
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": exc.public_message,
+                "retryable": exc.retryable,
+            },
+        ) from exc
     latency_ms = max(0, round((perf_counter() - started_at) * 1000))
 
     _validate_usage_values(
@@ -119,45 +133,48 @@ async def chat_completions(
         provider_result.usage.completion_tokens,
         provider_result.usage.total_tokens,
     )
-
-    # Calculate cost
     estimated_cost = provider.calculate_cost(
         provider_result.usage.prompt_tokens,
         provider_result.usage.completion_tokens,
-        request.model,
+        route.provider_model,
     )
     _validate_usage_values(estimated_cost)
 
-    # Record usage event (for monitoring and billing)
-    usage_event = UsageEvent(
+    usage = UsageRecord(
         id=f"usage_{uuid.uuid4().hex[:12]}",
-        timestamp=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        sub_key_id=key.id,
+        project_id=key.project_id,
+        sub_api_key_id=key.id,
         user_id=key.owner_id,
+        provider=route.provider_name,
         model=request.model,
+        provider_model=provider_result.model,
         input_tokens=provider_result.usage.prompt_tokens,
         output_tokens=provider_result.usage.completion_tokens,
         total_tokens=provider_result.usage.total_tokens,
-        estimated_cost_eur=estimated_cost,
+        estimated_cost_eur=Decimal(str(estimated_cost)),
+        currency="EUR",
         latency_ms=latency_ms,
         status="success",
+        created_at=datetime.now(timezone.utc),
     )
-    MOCK_USAGE_EVENTS.append(usage_event)
+    try:
+        await run_in_threadpool(service.record_usage, usage)
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    # Convert provider result to API response
-    response = ChatCompletionResponse(
+    return ChatCompletionResponse(
         id=provider_result.id,
         model=provider_result.model,
         choices=[
             {
-                "index": c.index,
+                "index": choice.index,
                 "message": {
-                    "role": c.message.role,
-                    "content": c.message.content,
+                    "role": choice.message.role,
+                    "content": choice.message.content,
                 },
-                "finish_reason": c.finish_reason,
+                "finish_reason": choice.finish_reason,
             }
-            for c in provider_result.choices
+            for choice in provider_result.choices
         ],
         usage={
             "prompt_tokens": provider_result.usage.prompt_tokens,
@@ -165,5 +182,3 @@ async def chat_completions(
             "total_tokens": provider_result.usage.total_tokens,
         },
     )
-
-    return response

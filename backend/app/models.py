@@ -1,8 +1,16 @@
 import re
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, Field, StringConstraints, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+)
 from typing_extensions import TypedDict
 
 
@@ -44,6 +52,10 @@ NormalizedEmail = Annotated[
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 PositiveInt = Annotated[int, Field(gt=0)]
 PositiveFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+NonNegativeMoney = Annotated[
+    Decimal,
+    Field(ge=0, max_digits=18, decimal_places=8),
+]
 
 
 class ChatMessage(TypedDict):
@@ -62,7 +74,7 @@ class User(BaseModel):
 class SubApiKey(BaseModel):
     id: str
     name: str
-    key: str
+    key_prefix: str
     owner_id: str
     allowed_models: list[str]
     status: Literal["active", "paused", "revoked", "expired"]
@@ -71,6 +83,12 @@ class SubApiKey(BaseModel):
     monthly_budget_eur: float
     created_at: str
     expires_at: str
+
+
+class CreatedSubApiKey(SubApiKey):
+    """Creation-only representation containing the bearer secret once."""
+
+    key: str
 
 
 class UsageEvent(BaseModel):
@@ -84,7 +102,58 @@ class UsageEvent(BaseModel):
     total_tokens: int
     estimated_cost_eur: float
     latency_ms: int
-    status: Literal["success", "failed"]
+    status: Literal["success", "failed", "blocked", "rate_limited"]
+    provider: str
+    provider_model: str
+    error_code: str | None = None
+
+
+class CreateProviderCredentialRequest(BaseModel):
+    provider: Literal["openai"]
+    name: NonEmptyString
+    credential: Annotated[SecretStr, Field(min_length=1)]
+
+    @field_validator("credential")
+    @classmethod
+    def require_nonblank_credential(cls, value: SecretStr) -> SecretStr:
+        secret = value.get_secret_value().strip()
+        if not secret:
+            raise ValueError("credential must not be blank")
+        return SecretStr(secret)
+
+
+class ProviderCredential(BaseModel):
+    id: str
+    project_id: str
+    provider: str
+    name: str
+    secret_hint: str
+    key_version: str
+    status: Literal["active", "revoked"]
+    created_at: str
+    updated_at: str
+
+
+class CreateModelConfigRequest(BaseModel):
+    public_model: NonEmptyString
+    provider_model: NonEmptyString
+    credential_id: NonEmptyString
+    input_cost_per_million_eur: NonNegativeMoney
+    output_cost_per_million_eur: NonNegativeMoney
+
+
+class ModelConfig(BaseModel):
+    id: str
+    project_id: str
+    public_model: str
+    provider: str
+    provider_model: str
+    credential_id: str | None
+    input_cost_per_million_eur: Decimal
+    output_cost_per_million_eur: Decimal
+    enabled: bool
+    created_at: str
+    updated_at: str
 
 
 class Project(BaseModel):

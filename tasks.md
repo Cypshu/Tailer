@@ -2,7 +2,8 @@
 
 Last reconciled: 2026-08-02
 
-This is the sole active execution board. Read `AGENTS.md` first and use `TAILER_Project_Implementation_Plan.md` for iteration context.
+This is the sole active execution board. Read `AGENTS.md` first and use
+`TAILER_Project_Implementation_Plan.md` for iteration context.
 
 ## Status key
 
@@ -15,14 +16,13 @@ Only one task should normally be marked in progress.
 
 ## Workspace warning
 
-- Local `main` is ahead of `origin/main` and has substantial pre-existing tracked and untracked work.
-- Preserve unrelated changes; do not blanket-clean, reset, or stage the repository.
-- `.claude/worktrees/` contains three registered branches with commits not merged into `main`:
-  - `worktree-fix-scripts`
-  - `worktree-test-subkey`
-  - `worktree-test-subkey-run`
-- Do not delete those directories directly. Reconcile through Git worktree and branch operations in a separately authorized task.
-- `.tailer-runs/` is generated local harness output, not the canonical test suite.
+- Iterations 1 and 2 are present as uncommitted work in the root worktree. Preserve them;
+  do not blanket-clean, reset, checkout, or stage unrelated files.
+- Root `main` matched `origin/main` at commit `29828c8` before this iteration.
+- `.claude/worktrees/` contains registered branches with unmerged commits.
+  Reconcile them through Git worktree/branch operations only in a separately
+  authorized task; never delete their directories directly.
+- `.tailer-runs/` is ignored generated output, not the canonical test suite.
 
 ## Verified baseline
 
@@ -30,237 +30,190 @@ Passed on 2026-08-02:
 
 - `frontend: npm run lint`
 - `frontend: npm run build`
-- `backend: python -m pytest -q` — 48 passed
-- `backend: reversed test-file order` — 48 passed
 - `backend: python -m compileall -q app tests`
-- live backend login/RBAC/user/runtime smoke flow
-- `docker compose config --quiet`
-- `backend: alembic upgrade head --sql`
-- disposable SQLite Alembic upgrade/downgrade/re-upgrade and drift check
+- `backend: python -m pytest -q` — 182 passed
+- `backend: reversed test-file order` — 182 passed
+- `tailer.cmd config` and `docker compose config --quiet`
+- Alembic head `0003`, drift check, SQLite round-trip/scoped-FK inspection,
+  legacy backfill, and clean PostgreSQL 16 upgrade/check/downgrade/re-upgrade
+- fresh PostgreSQL concurrent demo bootstrap — both processes succeeded and
+  converged to 3 users, 1 project, 3 keys, and 4 usage events
+- `tailer.cmd start` and `tailer.cmd restart` — PostgreSQL, Redis, backend, and
+  frontend all healthy
+- live liveness, repository readiness, frontend, and admin-login checks
+- live restart durability for a created user, revoked key, and usage event
+- live concurrent duplicate-user result of one 200 and one 409
+- raw creation key absent from later API reads, PostgreSQL, and backend logs
+- encrypted provider credential/model APIs, real OpenAI adapter routing, and
+  durable sanitized provider-failure usage passed isolated and live probes
+- live encrypted credential ciphertext, unavailable-upstream failure, restart
+  durability, and log redaction passed; exact provider/key/usage probes were
+  removed afterward
+- probe rows/databases removed after acceptance; the development stack remains
+  running and healthy
 
-Not verified:
+Known validation limitation: the systemd unit passed structural review, but a
+live systemd/cgroup host was unavailable under WSL1. Verify installation and
+boot behavior on the target Linux host. A successful completion against the
+real OpenAI service also awaits an environment-supplied disposable credential.
 
-- full Compose startup; Docker daemon unavailable
-- online PostgreSQL Alembic upgrade/downgrade; Docker daemon and local PostgreSQL are unavailable
-
-## Implemented iteration: reproducible API contract
+## Completed foundation
 
 ### 0. Repository and documentation preparation
 
 - Status: `[x]`
-- Goal: make the next task discoverable and remove misleading project clutter.
+- Active documentation has a source-of-truth hierarchy and dated material is
+  archived.
+- Docker contexts and generated-output ignores are in place.
+- Registered worktrees were preserved.
+- The obsolete frontend duplicate data and loose runtime demo were removed.
 
-Completed:
-
-- Audited all distinct project Markdown content, including ignored worktree snapshots.
-- Consolidated active documentation and archived dated summaries.
-- Added safe Docker build-context and ignore hygiene.
-- Preserved registered worktrees and the generated run harness.
-- Removed the unused frontend mock-data duplicate and the assertion-free loose runtime demo.
-- Corrected landing-page and admin-action text that claimed unavailable behavior.
-- Recorded verified and unverified baseline facts.
-- Selected contract tests before persistence as the next implementation step.
-
-### 1. Backend characterization test suite
+### 1. Reproducible API contract
 
 - Status: `[x]`
-- Priority: P0
-- Goal: create a deterministic regression contract for current auth and runtime behavior.
+- Deterministic FastAPI tests cover login, RBAC, user scoping, runtime key
+  authorization, provider forwarding, usage, and invalid boundaries.
+- Every client contract runs against both a fresh copy-on-write memory adapter
+  and a fresh Alembic-migrated SQLAlchemy/SQLite adapter.
+- Tests pass in normal and reversed order without live services.
 
-Files:
-
-- `backend/requirements-dev.txt`
-- `backend/tests/conftest.py`
-- `backend/tests/test_auth.py`
-- `backend/tests/test_admin.py`
-- `backend/tests/test_runtime.py`
-- `backend/tests/test_migrations.py`
-
-Tasks:
-
-- [x] Add compatible `pytest` and `httpx` development dependencies.
-- [x] Build a FastAPI `TestClient` fixture.
-- [x] Reset mock users, projects, keys, usage events, dependency overrides, and provider state around every test.
-- [x] Test valid and invalid login.
-- [x] Test anonymous admin 401 and user admin 403.
-- [x] Test authenticated user identity and key scoping.
-- [x] Test valid, invalid, revoked, expired, malformed-expiry, and model-forbidden runtime keys.
-- [x] Test successful usage-event delta.
-- [x] Test that pre-provider rejections do not add a success event.
-- [x] Remove the loose root runtime demo so pytest collection is unambiguous.
-
-Acceptance:
-
-- `cd backend && python -m pytest` passes without live services.
-- Two consecutive runs pass in either order.
-- Tests do not leak mutations into later tests.
-- The suite fails when a protected behavior is deliberately broken.
-
-Evidence: 48 tests passed in normal and reversed file order without live services. The migration test uses its own temporary SQLite database.
-
-### 2. Request-boundary and JWT configuration hardening
+### 2. Request, auth, and metering hardening
 
 - Status: `[x]`
-- Priority: P0
-- Depends on: Task 1
-- Goal: reject invalid data and make declared auth configuration truthful.
+- Email normalization, duplicate conflict, owner existence, future expiry,
+  positive limits, typed messages, positive `max_tokens`, and temperature bounds
+  are enforced.
+- JWT settings are authoritative.
+- Expiry/model denial occurs before provider invocation.
+- Supported provider options, measured latency, and invalid-metering rejection
+  are tested.
+- Usage pagination is bounded consistently across adapters.
 
-Tasks:
+### 3. Alembic and Compose runtime readiness
 
-- [x] Validate and normalize email.
-- [x] Return a conflict for duplicate email.
-- [x] Require an existing owner for new keys.
-- [x] Require non-empty allowed models.
-- [x] Require positive limits and budget values.
-- [x] Parse and require a future expiry.
-- [x] Type and validate chat messages.
-- [x] Require positive `max_tokens` and bounded temperature.
-- [x] Reject expired keys before provider invocation.
-- [x] Forward supported runtime options.
-- [x] Measure latency instead of storing a constant.
-- [x] Use the declared JWT secret, algorithm, and expiration settings.
-- [x] Add tests for every rule.
+- Status: `[x]`
+- Alembic consumes `TAILER_DATABASE_URL` and revision `0002` aligns ORM and API
+  contracts, constraints, UTC timestamps, exact money, provider-model/currency,
+  and non-null latency.
+- PostgreSQL and Redis gate backend startup; backend repository readiness gates
+  frontend startup.
+- The container migrates and seeds before starting non-reloading Uvicorn.
+- `/health` is liveness and `/ready` checks repository connectivity.
 
-Acceptance:
+## Completed Iteration 1 — persistence vertical slice
 
-- Invalid payloads return stable 4xx responses.
-- Negative or rejected requests cannot create successful usage.
-- Existing happy-path contract tests remain green.
+### 4. Freeze API-to-ORM mappings
 
-### 3. Alembic and Compose runtime verification
+- Status: `[x]`
+- Default project, usage aliases, required provider metadata, seed behavior,
+  session lifetime, and transaction ownership are frozen in
+  `docs/architecture.md`.
+- A raw Sub-API key is creation-only. Later reads expose `key_prefix`; storage
+  contains only a peppered HMAC-SHA-256 digest and safe display fragment.
 
-- Status: `[!]`
-- Priority: P0
-- Depends on: Task 1
-- Goal: make the persistence scaffold executable from documented configuration.
+### 5. Repository boundary and in-memory adapter
 
-Tasks:
-
-- [x] Remove the obsolete Compose `version` field and revalidate configuration rendering.
-- [x] Make Alembic consume the configured database URL.
-- [x] Remove the hardcoded URL mismatch.
-- [x] Add a disposable SQLite upgrade/downgrade/re-upgrade regression test.
-- [ ] Verify upgrade, downgrade, and re-upgrade on a clean PostgreSQL database — blocked: Docker daemon and local PostgreSQL unavailable.
-- [ ] Verify full Compose startup — blocked: Docker daemon unavailable.
-- [x] Record exact commands and results in `docs/testing.md`.
-- [x] Add backend/frontend health checks and dependency sequencing to Compose.
-
-Acceptance:
-
-- A clean database reaches Alembic head and round-trips safely.
-- Backend health and frontend access work through Compose.
-- No obsolete Compose configuration warning remains.
-
-The implementation portion is complete. Iteration 0 exits under its concrete-external-blocker clause; Task 6 must not cut over to PostgreSQL until the two Docker-backed checks above pass.
-
-## Next iteration: persistence vertical slice
-
-### 4. Freeze API-to-ORM mappings — NEXT
-
-- Status: `[ ]`
-- Priority: P1
-- Depends on: Task 1 and Task 3 configuration work. The documented Docker verification blocker does not prevent this design-only task.
-
-Decisions required:
-
-- [ ] Default project and `project_id` behavior
-- [ ] create-only raw key versus stored hash/prefix
-- [ ] usage field mapping and required provider/project fields
-- [ ] idempotent demo seed behavior
-- [ ] transaction and repository boundaries
-
-Acceptance:
-
-- `docs/architecture.md` records one unambiguous mapping.
-- Migration, ORM, Pydantic, and endpoint contracts agree.
-
-### 5. Repository boundary with in-memory adapter
-
-- Status: `[ ]`
-- Priority: P1
-- Depends on: Tasks 1 and 4
-
-Tasks:
-
-- [ ] Define focused repositories/services for users, projects, keys, and usage.
-- [ ] Wrap the current mock store behind an adapter.
-- [ ] Inject repositories into auth/admin/user/runtime routes.
-- [ ] Remove direct global-list imports from route modules.
-- [ ] Keep all characterization tests green.
-
-Acceptance:
-
-- Routes depend on repository/service interfaces.
-- Current behavior is unchanged.
-- Mock state remains usable for isolated tests.
+- Status: `[x]`
+- Focused user, project, key, and usage repositories sit behind an explicit
+  unit of work and application service.
+- Auth/admin/user/runtime routes no longer import global mock lists.
+- The memory adapter uses serialized copy-on-write transactions, detached
+  records, explicit commit/rollback semantics, and constant-time digest compare.
+- The obsolete `backend/app/mock_data.py` was removed.
 
 ### 6. SQLAlchemy adapter and durable cutover
 
-- Status: `[ ]`
-- Priority: P1
-- Depends on: Tasks 3, 4, and 5
+- Status: `[x]`
+- SQLAlchemy repositories back all active route behavior by default.
+- The demo seed is deterministic, collision-aware, idempotent, concurrent-start
+  tolerant, and does not silently rewrite hashes after pepper rotation.
+- Persistence constraint conflicts are translated at the service boundary;
+  duplicate user creation returns 409 instead of leaking an integrity failure.
+- Runtime authorization closes its read transaction before provider I/O and
+  records successful usage in a separate short transaction.
+- User/key writes, revocation, and usage survive a complete controller restart.
+- Backend and frontend implement the show-once key flow end to end.
+
+Iteration 1 exit gate: passed on 2026-08-02.
+
+## Active iteration
+
+### 7. Secure provider credential and real-adapter slice — IN PROGRESS
+
+- Status: `[~]`
+- Priority: P2
+- Depends on: completed Iteration 1
+- Goal: route one real provider without exposing its credential.
 
 Tasks:
 
-- [ ] Add idempotent demo seed.
-- [ ] Implement SQLAlchemy repositories.
-- [ ] Cut over auth and user lookup.
-- [ ] Cut over admin reads and writes.
-- [ ] Cut over runtime key lookup and usage writes.
-- [ ] Add PostgreSQL integration and restart-durability tests.
+- [x] Freeze the provider-credential encryption/key-management contract.
+- [x] Add `provider_credentials` and the minimum `model_configs` schema through
+  a new Alembic revision.
+- [x] Add admin create/list/delete credential APIs; reveal no raw secret or
+  ciphertext in read responses.
+- [x] Implement one real provider adapter behind `backend/app/providers.py`.
+- [x] Resolve a public model alias to provider, provider model, and credential.
+- [x] Normalize upstream timeouts, authentication, rate-limit, and response
+  failures without leaking prompt or secret data.
+- [x] Persist success and provider-failure usage with stable status/error data.
+- [x] Keep `MockProvider` as the deterministic test adapter.
+- [x] Add tests for encryption-at-rest, redaction, adapter requests, normalized
+  errors, transaction lifetime, and log safety.
+- [x] Add an operator smoke flow that uses an environment-supplied disposable
+  provider credential; never add a real credential to the repository.
 
-Acceptance:
+Acceptance status:
 
-- No active route reads `MOCK_*` directly.
-- Mutations and usage survive restart.
-- Contract tests pass against both adapters.
+- [x] Database, API responses, frontend payloads, and logs contain neither the raw
+  provider credential nor raw Sub-API keys.
+- [!] A configured real-provider completion succeeds through
+  `/v1/chat/completions`.
+- [x] Provider failures are durable and normalized.
+- [x] All earlier regression tests remain green and the expanded 182-case suite
+  passes in normal and reversed file order.
+
+Implementation, security, PostgreSQL revision `0003`, clean-image Compose,
+restart, encryption-at-rest, failure durability, and log-redaction gates pass.
+The only open exit-gate item is a successful request using an
+environment-supplied disposable OpenAI credential; no such credential was
+available in this environment. Keep Task 7 in progress until that smoke passes.
+
+The Sub-API-key hash-at-rest/show-once work originally planned here was pulled
+forward and completed in Iteration 1; do not reimplement it.
 
 ## Later queue
 
-### 7. Secure provider and Sub-API-key lifecycle
+### 8. Model policy enforcement
 
 - Status: `[ ]`
 - Priority: P2
-- Outcome: encrypted provider credentials, hash-at-rest keys, show-once creation, one real adapter.
+- Outcome: model aliases, max tokens, per-minute/daily requests, token and cost
+  budgets, provider-not-called guarantees, and Redis concurrency safety.
 
-### 8. Model configuration and policy enforcement
-
-- Status: `[ ]`
-- Priority: P2
-- Outcome: aliases, expiration, request/token/cost limits, and provider-not-called guarantees.
-
-### 9. Durable usage and audit behavior
+### 9. Durable audit behavior
 
 - Status: `[ ]`
 - Priority: P2
-- Outcome: success, failure, and blocked events with trustworthy latency and cost.
+- Outcome: success, provider failure, blocked, and rate-limited events with
+  stable error codes, trustworthy latency/cost, and retention rules.
 
 ### 10. Project and dashboard completion
 
 - Status: `[ ]`
 - Priority: P3
-- Outcome: project/provider/model surfaces, truthful user integration help, and admin reporting.
+- Outcome: project/provider/model management, honest integration help, admin
+  usage/error views, and CSV export.
 
 ### 11. Deployment preparation
 
 - Status: `[ ]`
 - Priority: P3
-- Outcome: production configuration, migrations, HTTPS, backups, logs, and operator guide.
+- Outcome: production configuration validation, HTTPS, backup/restore, logs,
+  secret rotation, systemd host verification, and an operator runbook.
 
 ## Deferred
 
-Pipelines, multi-organization tenancy, billing, advanced analytics, RAG, and agent orchestration remain deferred until the core MVP gate in the implementation plan is met.
-
-## Compact completed log
-
-- Standalone repository and Docker-oriented service layout
-- Frontend/backend read and write integration
-- Admin dashboard correctness pass
-- JWT login and basic RBAC
-- Mock provider/runtime boundary
-- Persistence model and Alembic scaffold
-- Deterministic 48-case backend regression suite
-- Request-boundary, expiry, metering, and JWT configuration hardening
-- Environment-driven Alembic configuration and Compose health sequencing
-- Frontend build repair and form-field readability
-- Documentation and repository-hygiene preparation
+Pipelines, multi-organization tenancy, billing, advanced analytics, RAG, and
+agent orchestration remain deferred until the core MVP gate in the implementation
+plan is met.

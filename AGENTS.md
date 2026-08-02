@@ -22,10 +22,33 @@ Do not infer completed behavior from an architecture or archived summary.
 - Runtime auth uses a distinct TAILER Sub-API bearer key.
 - Request models validate normalized email, positive limits, future expiry, and typed chat input.
 - Runtime requests enforce active/expiry/model checks before invoking the provider.
-- Active auth, admin, user, runtime, and usage behavior reads and mutates `backend/app/mock_data.py`.
-- `backend/app/database.py`, `backend/app/models_db.py`, and `backend/alembic/` are inactive persistence scaffolding.
-- The provider boundary exists, but only `MockProvider` is implemented.
-- Raw demo keys and display-name passwords make this development-only software.
+- Active auth, admin, user, runtime, and usage behavior goes through services and repository/unit-of-work interfaces.
+- SQLAlchemy/PostgreSQL is the default runtime repository; the in-memory adapter is retained for isolated tests.
+- The backend container migrates to Alembic head and applies an idempotent demo seed before serving requests.
+- `/health` is process liveness; `/ready` verifies that the configured repository can answer a query and is used by Compose.
+- Raw Sub-API keys are returned only by creation. Persistence stores a peppered HMAC-SHA-256 digest and a safe display prefix.
+- Provider credentials are encrypted with a versioned AES-256-GCM keyring and
+  associated data binding the ciphertext to its credential, project, provider,
+  and key version. Admin APIs expose metadata only.
+- Alembic head `0003` adds `provider_credentials` and `model_configs`; runtime
+  model aliases resolve provider models, credentials, and configured EUR pricing.
+- `OpenAIProvider` implements Chat Completions with normalized, sanitized
+  failures. Provider failures are durably recorded with a stable `error_code`;
+  the deterministic mock fallback remains active for the unconfigured demo seed.
+- Provider-management UI, rate limits, token budgets, cost budgets, per-key
+  maximum-token enforcement, and blocked-request audit writes are not implemented.
+- Deterministic demo keys in source, display-name passwords, and development secrets make this development-only software.
+- The 182-case backend suite runs API contracts against memory and fresh
+  Alembic-migrated SQLite adapters without live services, including an OpenAI
+  adapter exercised against a mocked upstream.
+- A disposable PostgreSQL 16 round-trip reaches head `0003`. The live Compose
+  stack has also exercised encrypted routing and a durable sanitized
+  `provider_unavailable` event across restart without secret/ciphertext leakage;
+  the final stack is healthy with an intentionally empty credential keyring.
+- Iteration 2 remains open until an operator completes a disposable real-OpenAI
+  credential success smoke; this is the sole acceptance gap, and neither the
+  mocked tests nor the non-routable failure probe proves live-provider success.
+- `tailer.cmd` and `tailer.sh` are the canonical Compose lifecycle controllers. The systemd unit under `deploy/systemd/` delegates to `tailer.sh`.
 
 ## Before editing
 
@@ -48,9 +71,14 @@ The root worktree may be dirty. Never use blanket clean, reset, checkout, or rec
 
 - Never add real provider credentials, private tokens, or production secrets.
 - Never expose an upstream provider key to the frontend or API clients.
+- Never log provider secrets or return stored credential ciphertext. Provider
+  credential list/create/revoke responses must remain metadata-only.
+- Keep every credential-encryption key version needed by stored rows; new
+  writes use `TAILER_CREDENTIAL_ACTIVE_KEY_VERSION`.
 - Validate policy before calling a provider.
 - Treat Sub-API keys as limited bearer credentials.
-- The target lifecycle is hash-at-rest and show-once; the current raw-key behavior is a known gap.
+- Preserve the hash-at-rest, show-once Sub-API-key lifecycle. Never add a raw bearer to list/detail responses, storage, or logs.
+- Treat `TAILER_SUB_API_KEY_PEPPER` as a credential: changing it invalidates existing bearer keys.
 - Do not claim limits, persistence, encryption, or real-provider routing without executable evidence.
 
 ## Validation baseline
@@ -70,13 +98,14 @@ python -m pytest
 
 # Infrastructure shape
 docker compose config --quiet
+./tailer.sh config
 
 # Migration generation without a database
 cd backend
 alembic upgrade head --sql
 ~~~
 
-Install `backend/requirements-dev.txt` before running the backend suite. The next implementation task is to freeze the API-to-ORM mapping in Task 4; do not cut routes over to persistence until those decisions are recorded. PostgreSQL migration and full Compose verification remain blocked until a Docker daemon is available.
+On Windows, use `tailer.cmd config` instead of the shell controller. Install `backend/requirements-dev.txt` before running the backend suite. Its API tests execute against both a fresh in-memory store and a fresh Alembic-migrated SQLite database; PostgreSQL is still required for runtime/Compose verification. Read `tasks.md` for the next implementation task rather than inferring it from older summaries.
 
 ## Completion standard
 

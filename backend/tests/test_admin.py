@@ -3,7 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from app.mock_data import MOCK_KEYS, MOCK_USERS
+from app.key_security import hash_sub_api_key
+from app.repositories.base import UnitOfWorkFactory
 
 
 def _future_expiry() -> str:
@@ -39,19 +40,37 @@ def test_normal_user_admin_request_returns_403(
     assert response.json() == {"detail": "Admin access required"}
 
 
+@pytest.mark.parametrize("query", ["limit=0", "limit=1001", "offset=-1"])
+def test_admin_usage_rejects_invalid_pagination(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    query: str,
+) -> None:
+    response = client.get(f"/admin/usage?{query}", headers=admin_headers)
+
+    assert response.status_code == 422
+
+
 def test_admin_can_list_users(
-    client: TestClient, admin_headers: dict[str, str]
+    client: TestClient,
+    admin_headers: dict[str, str],
+    uow_factory: UnitOfWorkFactory,
 ) -> None:
     response = client.get("/admin/users", headers=admin_headers)
 
     assert response.status_code == 200
-    assert {user["id"] for user in response.json()} == {user.id for user in MOCK_USERS}
+    with uow_factory() as uow:
+        expected_ids = {user.id for user in uow.users.list()}
+    assert {user["id"] for user in response.json()} == expected_ids
 
 
 def test_create_user_normalizes_email(
-    client: TestClient, admin_headers: dict[str, str]
+    client: TestClient,
+    admin_headers: dict[str, str],
+    uow_factory: UnitOfWorkFactory,
 ) -> None:
-    before_count = len(MOCK_USERS)
+    with uow_factory() as uow:
+        before_count = len(uow.users.list())
 
     response = client.post(
         "/admin/users",
@@ -65,13 +84,18 @@ def test_create_user_normalizes_email(
 
     assert response.status_code == 200
     assert response.json()["email"] == "new.user@example.com"
-    assert len(MOCK_USERS) == before_count + 1
+    with uow_factory() as uow:
+        assert len(uow.users.list()) == before_count + 1
+        assert uow.users.get_by_email("NEW.USER@EXAMPLE.COM") is not None
 
 
 def test_create_user_rejects_case_insensitive_duplicate(
-    client: TestClient, admin_headers: dict[str, str]
+    client: TestClient,
+    admin_headers: dict[str, str],
+    uow_factory: UnitOfWorkFactory,
 ) -> None:
-    before_count = len(MOCK_USERS)
+    with uow_factory() as uow:
+        before_count = len(uow.users.list())
 
     response = client.post(
         "/admin/users",
@@ -85,7 +109,8 @@ def test_create_user_rejects_case_insensitive_duplicate(
 
     assert response.status_code == 409
     assert response.json() == {"detail": "User with this email already exists"}
-    assert len(MOCK_USERS) == before_count
+    with uow_factory() as uow:
+        assert len(uow.users.list()) == before_count
 
 
 @pytest.mark.parametrize(
@@ -105,9 +130,12 @@ def test_create_user_rejects_invalid_email(
 
 
 def test_create_key_for_existing_owner(
-    client: TestClient, admin_headers: dict[str, str]
+    client: TestClient,
+    admin_headers: dict[str, str],
+    uow_factory: UnitOfWorkFactory,
 ) -> None:
-    before_count = len(MOCK_KEYS)
+    with uow_factory() as uow:
+        before_count = len(uow.keys.list())
     payload = _valid_key_payload()
 
     response = client.post("/admin/keys", headers=admin_headers, json=payload)
@@ -118,14 +146,35 @@ def test_create_key_for_existing_owner(
     assert body["allowed_models"] == payload["allowed_models"]
     assert body["status"] == "active"
     assert body["key"].startswith("tailer_sub_")
+    assert body["key_prefix"]
+    assert body["key_prefix"] != body["key"]
     assert body["expires_at"].endswith("Z")
-    assert len(MOCK_KEYS) == before_count + 1
+    key_id = body["id"]
+
+    with uow_factory() as uow:
+        stored = uow.keys.get_by_id(key_id)
+        assert stored is not None
+        assert len(uow.keys.list()) == before_count + 1
+        assert stored.key_hash == hash_sub_api_key(body["key"])
+        assert body["key"] not in stored.key_hash
+
+    detail = client.get(f"/admin/keys/{key_id}", headers=admin_headers)
+    listing = client.get("/admin/keys", headers=admin_headers)
+    assert detail.status_code == 200
+    assert "key" not in detail.json()
+    assert detail.json()["key_prefix"] == body["key_prefix"]
+    listed = next(key for key in listing.json() if key["id"] == key_id)
+    assert "key" not in listed
+    assert listed["key_prefix"] == body["key_prefix"]
 
 
 def test_create_key_requires_existing_owner(
-    client: TestClient, admin_headers: dict[str, str]
+    client: TestClient,
+    admin_headers: dict[str, str],
+    uow_factory: UnitOfWorkFactory,
 ) -> None:
-    before_count = len(MOCK_KEYS)
+    with uow_factory() as uow:
+        before_count = len(uow.keys.list())
     payload = _valid_key_payload()
     payload["owner_user_id"] = "user_missing"
 
@@ -133,7 +182,8 @@ def test_create_key_requires_existing_owner(
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Owner user not found"}
-    assert len(MOCK_KEYS) == before_count
+    with uow_factory() as uow:
+        assert len(uow.keys.list()) == before_count
 
 
 @pytest.mark.parametrize(
@@ -156,12 +206,15 @@ def test_create_key_rejects_invalid_boundaries_without_mutation(
     admin_headers: dict[str, str],
     field: str,
     value: object,
+    uow_factory: UnitOfWorkFactory,
 ) -> None:
-    before_count = len(MOCK_KEYS)
+    with uow_factory() as uow:
+        before_count = len(uow.keys.list())
     payload = _valid_key_payload()
     payload[field] = value
 
     response = client.post("/admin/keys", headers=admin_headers, json=payload)
 
     assert response.status_code == 422
-    assert len(MOCK_KEYS) == before_count
+    with uow_factory() as uow:
+        assert len(uow.keys.list()) == before_count

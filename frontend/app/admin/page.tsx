@@ -25,7 +25,7 @@ interface UsageEvent {
   total_tokens: number
   estimated_cost_eur: number
   latency_ms: number
-  status: 'success' | 'failed'
+  status: 'success' | 'failed' | 'blocked' | 'rate_limited'
 }
 
 interface SubApiKey {

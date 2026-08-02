@@ -8,24 +8,47 @@ This document separates current implementation from target architecture. For del
 Next.js browser UI
   -> JWT-authenticated /admin and /user routes
   -> FastAPI
-  -> mutable mock users, keys, projects, and usage lists
+  -> application services and unit of work
+  -> SQLAlchemy repositories
+  -> PostgreSQL
 
 External client
-  -> raw demo Sub-API bearer key
+  -> Sub-API bearer key
   -> POST /v1/chat/completions
-  -> validated request, active/expiry, and allowed-model checks
-  -> MockProvider
-  -> in-memory success usage append
+  -> HMAC lookup plus active/expiry/project/model checks
+  -> project-scoped public-model alias resolution
+  -> AES-GCM credential decryption (OpenAI route) or deterministic mock fallback
+  -> OpenAIProvider or MockProvider
+  -> normalized response or sanitized provider error
+  -> durable success or provider-failure usage write
 ~~~
 
-Persistence scaffolding exists but is inactive:
+PostgreSQL is the default runtime adapter. A copy-on-write in-memory adapter is
+retained for isolated tests; the complete API contract suite runs against both
+it and a fresh Alembic-migrated SQL database. Compose migrates to Alembic head
+and seeds deterministic demo records before starting the API.
 
-- `backend/app/database.py`
-- `backend/app/models_db.py`
-- `backend/alembic/`
-- `backend/alembic.ini`
+Implemented security behavior includes hashed dashboard passwords and generated
+high-entropy Sub-API keys whose HMAC digest is stored. The raw Sub-API key is
+returned only by its creation response; later reads expose a safe display
+fragment. Provider credentials are encrypted with AES-256-GCM using a versioned
+operator keyring. Authenticated associated data binds ciphertext to its
+credential ID, project ID, provider, and key version, so moving encrypted data
+to a different identity or scope fails authentication. Admin responses expose
+only safe credential metadata.
 
-Every active route still imports mock state directly.
+Alembic head `0003` adds `provider_credentials` and `model_configs`. An enabled
+model configuration maps a public alias to a concrete provider model,
+credential, and input/output EUR prices. The OpenAI Chat Completions adapter and
+its normalized error paths pass mocked-upstream integration tests. The mock
+fallback remains deterministic for the unconfigured development seed. A live
+configured encrypted route to a deliberately non-routable HTTPS upstream also
+verified sanitized `provider_unavailable` handling, durable failure persistence
+across restart, and API/log redaction. PostgreSQL reached `0003` through a clean
+upgrade/check/downgrade/re-upgrade. A successful request to OpenAI with a
+disposable real credential has not yet been verified and is the sole Iteration
+2 acceptance gap. Rate, token, cost, and per-request maximum-token policy
+enforcement plus pre-provider blocked-event writes remain future slices.
 
 ## Target MVP architecture
 
@@ -69,9 +92,17 @@ The MVP preserves the live route families:
 - `GET /admin/users/{user_id}`
 - `GET|POST /admin/keys`
 - `GET|DELETE /admin/keys/{key_id}`
+- `GET|POST /admin/provider-credentials`
+- `DELETE /admin/provider-credentials/{credential_id}`
+- `GET|POST /admin/model-configs`
+- `DELETE /admin/model-configs/{config_id}`
 - `GET /admin/usage`
 
-New project, provider, and model endpoints should remain under `/admin` for this API generation.
+Provider-credential responses are metadata-only; create accepts a secret but
+neither create/list/revoke responses nor model-configuration responses contain
+plaintext or ciphertext. The two `DELETE` routes revoke/disable rather than
+erasing audit-relevant configuration. New project endpoints should remain under
+`/admin` for this API generation.
 
 ### User
 
@@ -96,15 +127,15 @@ Dashboard tokens and runtime keys have different purposes:
 
 The two credentials must not be interchangeable.
 
-Target dashboard auth:
+Current dashboard auth:
 
 - hashed user passwords;
 - configured JWT secret, algorithm, and expiration;
 - stable `sub` claim;
 - role lookup from persisted user state;
-- optional refresh/session work after the baseline is secure.
+- no refresh/session flow yet.
 
-Target runtime auth:
+Current runtime auth:
 
 - random high-entropy raw key returned once;
 - stored keyed hash and display prefix;
@@ -119,36 +150,42 @@ Target runtime auth:
 2. Verify hashed key and load owner/project.
 3. Check status and expiry.
 4. Validate payload and requested model alias.
-5. Reserve/check rate and budget policy.
-6. Resolve provider credential and provider model.
+5. Resolve the enabled alias, provider credential, provider model, and pricing.
+6. Reserve/check rate and budget policy.
 7. Invoke the provider adapter.
-8. Normalize response and usage.
-9. Persist success or failure usage.
+8. Normalize response and usage or a sanitized provider failure.
+9. Persist success or provider-failure usage.
 10. Commit counters and return a stable response.
 ~~~
 
-Steps 1–6 must complete before an upstream call.
+Steps 1-6 must eventually complete before an upstream call.
+
+The current slice implements steps 1-5 and 7-9: it resolves an alias before
+I/O, decrypts a backend-held credential only for the selected route, normalizes
+provider failures, and durably writes their sanitized stable `error_code`.
+Step 6 and counter commits are not implemented; consequently configured rate
+and budget fields remain descriptive rather than enforced. Requests rejected
+before provider invocation are not yet written as blocked audit events.
 
 ## Service and repository boundaries
 
-Routes should coordinate HTTP concerns only. Introduce small services/repositories for:
+Routes coordinate HTTP concerns and delegate to focused services/repositories for:
 
 - users and dashboard identity;
 - projects;
 - Sub-API keys;
 - provider credentials;
 - model configurations;
-- usage events;
-- policy decisions.
+- usage events.
 
-Migration sequence:
+The current unit of work owns one transaction at a time. SQLAlchemy uses one
+Session per operation. The test-only memory implementation uses a serialized,
+copy-on-write transaction with explicit commit semantics. Neither adapter holds
+a transaction open during provider I/O.
 
-1. Characterize current API behavior with tests.
-2. Put mock lists behind an in-memory repository.
-3. Inject repositories into routes.
-4. Add SQLAlchemy repositories.
-5. Cut over one vertical path at a time.
-6. Retain the in-memory adapter for isolated tests only.
+Provider resolution performs repository reads in a short unit of work, closes
+it before upstream I/O, then records success or provider failure in a separate
+transaction. Policy decisions join these boundaries in a later iteration.
 
 ## Canonical persistence model
 
@@ -206,20 +243,17 @@ Use `created_at` internally. The API may expose a compatibility `timestamp` fiel
 
 ### provider_credentials
 
-Add in the secure-provider iteration:
-
 - `id`
 - `project_id`
 - provider and display name
 - encrypted credential ciphertext and key version
+- safe suffix hint
 - status
 - timestamps
 
 Never return ciphertext or raw credential values.
 
 ### model_configs
-
-Add with the first real provider:
 
 - `id`
 - `project_id`
@@ -230,19 +264,32 @@ Add with the first real provider:
 - input/output pricing metadata
 - timestamps
 
-## API-to-ORM decisions required before persistence
+## Frozen API-to-ORM mappings
 
-The current API and ORM do not align mechanically. The persistence design task must resolve:
+Iteration 1 uses these explicit mappings:
 
-| Current API | Current ORM | Required decision |
-| --- | --- | --- |
-| Key includes raw `key` | `key_hash` and `key_prefix` | create-only secret response plus safe read schema |
-| Key creation has no project | `project_id` required | explicit or seeded default project |
-| Usage uses `timestamp` | `created_at` | compatibility schema mapping |
-| Usage uses `sub_key_id` | `sub_api_key_id` | one internal name and mapped output |
-| Usage omits provider/project | both required | populate from resolved runtime context |
+| API boundary | Domain and persistence mapping |
+| --- | --- |
+| Key creation omits `project_id` | Assign configured `TAILER_DEFAULT_PROJECT_ID`; the seeded default is `proj_hackathon_2026`. Never infer the first project. |
+| `POST /admin/keys` raw `key` | Return the generated bearer once in the creation response. Store only an HMAC-SHA-256 digest and a safe display fragment. |
+| Key GET/list responses | Expose `key_prefix`; never expose or reconstruct the raw bearer. |
+| Usage `timestamp` | Map to UTC-aware `created_at` and serialize as an ISO `Z` string. |
+| Usage `sub_key_id` | Map to internal and ORM `sub_api_key_id`. |
+| Usage omits project/provider metadata | Copy `project_id` and `user_id` from the authorized key; persist the provider identifier, public model, provider model, and `EUR` currency. |
+| Provider credential create body | Encrypt the one supplied plaintext secret before persistence. Return only metadata, including a masked suffix hint and key version; never serialize plaintext or ciphertext. |
+| Runtime public model | Resolve the enabled `(project_id, public_model)` configuration to its provider, provider model, credential, and configured EUR token prices. |
+| Provider failure | Return a stable sanitized error object and durably persist a zero-token event with `failed` or `rate_limited` status and its stable `error_code`. |
 
-Do not start route cutover until these mappings are tested and documented.
+Sub-API-key digests use a dedicated `TAILER_SUB_API_KEY_PEPPER`, separate from JWT signing secrets. Changing the pepper invalidates existing bearer keys and therefore requires an intentional rotation plan.
+
+The deterministic demo seed runs after Alembic, inserts rows in foreign-key order, and never overwrites compatible existing rows. It aborts and rolls back on fixed-ID or normalized-email collisions. Demo key expiry is fixed at the end of 2099 so the seed does not become date-dependent.
+
+Routes depend on application services backed by a unit-of-work factory. The
+in-memory adapter owns a serialized copy-on-write store with explicit commit and
+rollback; the SQLAlchemy adapter owns one Session per unit of work. Repositories
+do not commit or raise HTTP errors. Runtime authorization closes its read
+transaction before provider I/O, then usage is written in a separate short
+transaction before a success response is returned.
 
 ## Provider boundary
 
@@ -257,7 +304,15 @@ A provider adapter must:
 - support test substitution;
 - avoid logging secrets or prompt content by default.
 
-Implement one real provider first. Multi-provider routing follows only after the first adapter is reliable.
+`OpenAIProvider` is the first real adapter and calls the OpenAI Chat Completions
+endpoint with a server-side bearer credential. It maps upstream HTTP,
+connection, timeout, and response-shape failures to stable public errors without
+copying upstream bodies into client responses or logs. Configured per-million-
+token EUR rates drive estimated cost. Its request/response integration is
+verified against a mocked upstream, and its connection-failure path has been
+verified through the live Compose stack without secret leakage. A successful
+disposable real-credential smoke is still required. Multi-provider routing
+follows only after this exit gate is closed.
 
 ## Policy architecture
 
@@ -284,7 +339,9 @@ Redis may hold fast counters, but PostgreSQL remains the durable source for conf
 
 ## Usage and privacy
 
-Record metadata for successful, failed, and blocked requests. Do not store full prompts or outputs by default.
+Record metadata for successful, failed, and blocked requests. Success and
+provider-failure metadata are implemented; blocked-request persistence is not.
+Do not store full prompts or outputs by default.
 
 Usage writes must be:
 
@@ -316,6 +373,10 @@ Target UI work follows backend contracts:
 - label unavailable actions as unavailable;
 - avoid claiming provider, persistence, or policy features before they exist.
 
+The current frontend has no provider-credential or model-configuration
+management screen. Those operations are available only through authenticated
+admin API calls.
+
 ## Deployment shape
 
 Local development uses Compose services for:
@@ -324,6 +385,11 @@ Local development uses Compose services for:
 - Redis
 - FastAPI backend
 - Next.js frontend
+
+`tailer.cmd` is the interactive/command-line Windows controller and `tailer.sh`
+is the Unix controller for start, stop, restart, status, logs, and configuration
+validation. `deploy/systemd/tailer.service` wraps the Unix controller for a
+rootful Docker host installed at `/opt/tailer`.
 
 Production additionally requires:
 

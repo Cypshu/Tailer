@@ -1,6 +1,8 @@
 ﻿# TAILER Implementation Session Summary
 
 > Archived session note from 2026-07-04. Its backend blocker was resolved later; use the current task board.
+>
+> Current checkpoint (2026-08-02): Iteration 1 persistence is complete and Iteration 2 implementation is complete; a disposable live OpenAI success smoke remains pending. See the root [task board](../../../tasks.md).
 
 ## Date
 July 4, 2026 - Task Repair & Stabilization Session

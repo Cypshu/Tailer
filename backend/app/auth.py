@@ -8,7 +8,10 @@ from pydantic import BaseModel
 from app.config import settings
 
 # Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["pbkdf2_sha256", "bcrypt"],
+    deprecated=["bcrypt"],
+)
 
 
 class TokenData(BaseModel):

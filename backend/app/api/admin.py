@@ -1,168 +1,256 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Header
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+
+from app.auth import decode_access_token
 from app.models import (
+    CreatedSubApiKey,
+    CreateKeyRequest,
+    CreateModelConfigRequest,
+    CreateProviderCredentialRequest,
+    CreateUserRequest,
     DashboardStats,
-    User,
+    ModelConfig,
+    ProviderCredential,
     SubApiKey,
     UsageEvent,
-    CreateUserRequest,
-    CreateKeyRequest,
+    User,
 )
-from app.mock_data import (
-    MOCK_USERS,
-    MOCK_KEYS,
-    MOCK_USAGE_EVENTS,
-    get_total_tokens_used,
-    get_total_cost_estimated,
-    get_active_keys_count,
+from app.repositories.dependencies import get_service
+from app.serialization import (
+    created_key_response,
+    key_response,
+    model_config_response,
+    provider_credential_response,
+    usage_response,
+    user_response,
 )
-from app.auth import decode_access_token
-from typing import Optional
-import uuid
-from datetime import datetime, timezone
+from app.services import (
+    AuthorizationError,
+    ConfigurationError,
+    ConflictError,
+    NotFoundError,
+    TailerService,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-def get_admin_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """Extract user ID from JWT token and verify user is admin."""
+def get_admin_user_id(
+    authorization: Optional[str] = Header(None),
+    service: TailerService = Depends(get_service),
+) -> str:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    token = authorization.replace("Bearer ", "").strip()
-    token_data = decode_access_token(token)
-
+    token_data = decode_access_token(authorization.removeprefix("Bearer ").strip())
     if not token_data or not token_data.user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    # Verify user is admin
-    user = next((u for u in MOCK_USERS if u.id == token_data.user_id), None)
-    if not user or user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
-        )
-
+    try:
+        service.require_admin(token_data.user_id)
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return token_data.user_id
 
 
 @router.get("/dashboard/stats", response_model=DashboardStats)
-async def get_dashboard_stats(admin_id: str = Depends(get_admin_user_id)):
-    """Get admin dashboard statistics."""
-    active_users = len([u for u in MOCK_USERS if u.role == "user"])
-    return DashboardStats(
-        active_keys=get_active_keys_count(),
-        total_tokens_used=get_total_tokens_used(),
-        total_cost_estimated=get_total_cost_estimated(),
-        active_users=active_users,
-        total_requests=len(MOCK_USAGE_EVENTS),
-    )
+def get_dashboard_stats(
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    return DashboardStats(**service.dashboard_stats())
 
 
 @router.get("/users", response_model=list[User])
-async def list_users(admin_id: str = Depends(get_admin_user_id)):
-    """Get all users."""
-    return MOCK_USERS
+def list_users(
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    return [user_response(user) for user in service.list_users()]
 
 
 @router.post("/users", response_model=User)
-async def create_user(user_data: CreateUserRequest, admin_id: str = Depends(get_admin_user_id)):
-    """Create a new user."""
-    if any(user.email.strip().lower() == user_data.email for user in MOCK_USERS):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User with this email already exists",
-        )
-
-    new_user = User(
-        id=f"user_{uuid.uuid4().hex[:12]}",
-        email=user_data.email,
-        name=user_data.name,
-        role=user_data.role,
-        created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    )
-    MOCK_USERS.append(new_user)
-    return new_user
+def create_user(
+    user_data: CreateUserRequest,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        return user_response(service.create_user(user_data))
+    except ConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.get("/users/{user_id}", response_model=User)
-async def get_user(user_id: str, admin_id: str = Depends(get_admin_user_id)):
-    """Get a specific user."""
-    user = next((u for u in MOCK_USERS if u.id == user_id), None)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+def get_user(
+    user_id: str,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        return user_response(service.get_user(user_id))
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/keys", response_model=list[SubApiKey])
-async def list_keys(admin_id: str = Depends(get_admin_user_id)):
-    """Get all Sub-API Keys."""
-    return MOCK_KEYS
+def list_keys(
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    return [key_response(key) for key in service.list_keys()]
 
 
-@router.post("/keys", response_model=SubApiKey)
-async def create_key(key_data: CreateKeyRequest, admin_id: str = Depends(get_admin_user_id)):
-    """Create a new Sub-API Key."""
-    if not any(user.id == key_data.owner_user_id for user in MOCK_USERS):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Owner user not found",
-        )
-
-    new_key = SubApiKey(
-        id=f"subkey_{uuid.uuid4().hex[:12]}",
-        name=key_data.name,
-        key=f"tailer_sub_{uuid.uuid4().hex}",
-        owner_id=key_data.owner_user_id,
-        allowed_models=key_data.allowed_models,
-        status="active",
-        daily_request_limit=key_data.daily_request_limit,
-        monthly_token_limit=key_data.monthly_token_limit,
-        monthly_budget_eur=key_data.monthly_budget_eur,
-        created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        expires_at=key_data.expires_at.isoformat().replace("+00:00", "Z"),
-    )
-    MOCK_KEYS.append(new_key)
-    return new_key
+@router.post("/keys", response_model=CreatedSubApiKey)
+def create_key(
+    key_data: CreateKeyRequest,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        created = service.create_key(key_data)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return created_key_response(created.record, created.raw_key)
 
 
 @router.get("/keys/{key_id}", response_model=SubApiKey)
-async def get_key(key_id: str, admin_id: str = Depends(get_admin_user_id)):
-    """Get a specific Sub-API Key."""
-    key = next((k for k in MOCK_KEYS if k.id == key_id), None)
-    if not key:
-        raise HTTPException(status_code=404, detail="Key not found")
-    return key
+def get_key(
+    key_id: str,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        return key_response(service.get_key(key_id))
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.delete("/keys/{key_id}")
-async def revoke_key(key_id: str, admin_id: str = Depends(get_admin_user_id)):
-    """Revoke a Sub-API Key."""
-    key = next((k for k in MOCK_KEYS if k.id == key_id), None)
-    if not key:
-        raise HTTPException(status_code=404, detail="Key not found")
-    key.status = "revoked"
+def revoke_key(
+    key_id: str,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        service.revoke_key(key_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "revoked", "key_id": key_id}
 
 
-@router.get("/usage", response_model=list[UsageEvent])
-async def get_usage_events(
-    limit: int = 100, offset: int = 0, user_id: str = None, key_id: str = None,
-    admin_id: str = Depends(get_admin_user_id)
+@router.get(
+    "/provider-credentials",
+    response_model=list[ProviderCredential],
+)
+def list_provider_credentials(
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
 ):
-    """Get usage events with optional filtering."""
-    events = MOCK_USAGE_EVENTS
+    return [
+        provider_credential_response(credential)
+        for credential in service.list_provider_credentials()
+    ]
 
-    if user_id:
-        events = [e for e in events if e.user_id == user_id]
-    if key_id:
-        events = [e for e in events if e.sub_key_id == key_id]
 
-    return sorted(events, key=lambda e: e.timestamp, reverse=True)[offset : offset + limit]
+@router.post(
+    "/provider-credentials",
+    response_model=ProviderCredential,
+)
+def create_provider_credential(
+    credential_data: CreateProviderCredentialRequest,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        credential = service.create_provider_credential(credential_data)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return provider_credential_response(credential)
+
+
+@router.delete(
+    "/provider-credentials/{credential_id}",
+    response_model=ProviderCredential,
+)
+def revoke_provider_credential(
+    credential_id: str,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        credential = service.revoke_provider_credential(credential_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return provider_credential_response(credential)
+
+
+@router.get("/model-configs", response_model=list[ModelConfig])
+def list_model_configs(
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    return [
+        model_config_response(config) for config in service.list_model_configs()
+    ]
+
+
+@router.post("/model-configs", response_model=ModelConfig)
+def create_model_config(
+    config_data: CreateModelConfigRequest,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        config = service.create_model_config(config_data)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return model_config_response(config)
+
+
+@router.delete("/model-configs/{config_id}", response_model=ModelConfig)
+def disable_model_config(
+    config_id: str,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    try:
+        config = service.disable_model_config(config_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return model_config_response(config)
+
+
+@router.get("/usage", response_model=list[UsageEvent])
+def get_usage_events(
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    user_id: str | None = None,
+    key_id: str | None = None,
+    admin_id: str = Depends(get_admin_user_id),
+    service: TailerService = Depends(get_service),
+):
+    return [
+        usage_response(event)
+        for event in service.list_usage(
+            user_id=user_id,
+            key_id=key_id,
+            limit=limit,
+            offset=offset,
+        )
+    ]

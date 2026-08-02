@@ -16,15 +16,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Install additional dependencies
-RUN pip install --no-cache-dir psycopg2-binary
-
 # Expose port
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8000/ready || exit 1
 
-# Run the application
-CMD ["python", "main.py"]
+# Apply migrations, seed deterministic development fixtures, then run the API.
+CMD ["sh", "-c", "alembic upgrade head && python -m app.bootstrap && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

@@ -1,5 +1,5 @@
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker
 from app.config import settings
 
 engine = create_engine(
@@ -8,13 +8,9 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-
-def get_db() -> Session:
-    """Dependency for database session injection."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+    bind=engine,
+)

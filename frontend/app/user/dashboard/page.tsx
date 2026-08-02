@@ -2,23 +2,9 @@
 
 import { Card } from '@/components/Card'
 import { StatCard } from '@/components/StatCard'
-import { api } from '@/lib/api'
-import { FiKey, FiTrendingUp, FiActivity, FiCopy } from 'react-icons/fi'
+import { api, type SubApiKey } from '@/lib/api'
+import { FiKey, FiTrendingUp, FiActivity } from 'react-icons/fi'
 import { useEffect, useState } from 'react'
-
-interface SubApiKey {
-  id: string
-  name: string
-  key?: string
-  owner_id?: string
-  allowed_models?: string[]
-  status?: string
-  daily_request_limit?: number
-  monthly_token_limit?: number
-  monthly_budget_eur?: number
-  created_at?: string
-  expires_at?: string
-}
 
 interface UserStats {
   api_keys: number
@@ -46,7 +32,6 @@ export default function UserDashboard() {
   const [usageEvents, setUsageEvents] = useState<UsageEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
 
   useEffect(() => {
     const fetchData = async () => {
@@ -70,13 +55,6 @@ export default function UserDashboard() {
 
     fetchData()
   }, [])
-
-  const handleCopyKey = (key: string) => {
-    navigator.clipboard.writeText(key).then(() => {
-      setCopiedKeyId(Math.random().toString())
-      setTimeout(() => setCopiedKeyId(null), 2000)
-    })
-  }
 
   if (loading) {
     return (
@@ -204,11 +182,10 @@ export default function UserDashboard() {
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <h4 className="font-semibold text-gray-900">{key.name}</h4>
-                    {key.key && (
-                      <p className="text-xs text-gray-600 font-mono mt-1">
-                        {key.key.substring(0, 15)}...{key.key.substring(key.key.length - 5)}
-                      </p>
-                    )}
+                    <p className="mt-1 text-xs text-gray-600">
+                      Key prefix:{' '}
+                      <code className="font-mono text-gray-700">{key.key_prefix}</code>
+                    </p>
                   </div>
                   <span className="inline-block bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-medium">
                     {key.status || 'Active'}
@@ -231,17 +208,6 @@ export default function UserDashboard() {
                     </p>
                   </div>
                 </div>
-
-                {key.key && (
-                  <button
-                    onClick={() => handleCopyKey(key.key!)}
-                    className={`text-sm font-medium flex items-center gap-1 transition-colors ${
-                      copiedKeyId ? 'text-green-600' : 'text-blue-600 hover:text-blue-800'
-                    }`}
-                  >
-                    <FiCopy className="text-xs" /> {copiedKeyId ? 'Copied!' : 'Copy Key'}
-                  </button>
-                )}
               </div>
             ))
           ) : (
