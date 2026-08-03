@@ -109,7 +109,7 @@ class UsageEvent(BaseModel):
 
 
 class CreateProviderCredentialRequest(BaseModel):
-    provider: Literal["openai"]
+    provider: Literal["openai", "gemini"]
     name: NonEmptyString
     credential: Annotated[SecretStr, Field(min_length=1)]
 

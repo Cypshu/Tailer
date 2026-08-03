@@ -72,3 +72,6 @@ redis_data/
 
 # claude
 .claude/
+
+# test api
+.gemini_api

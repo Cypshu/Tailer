@@ -1,0 +1,7 @@
+.gemini_api
+.env
+.env.*
+!.env.example
+.git
+.claude
+.tailer-runs

@@ -17,8 +17,8 @@ External client
   -> POST /v1/chat/completions
   -> HMAC lookup plus active/expiry/project/model checks
   -> project-scoped public-model alias resolution
-  -> AES-GCM credential decryption (OpenAI route) or deterministic mock fallback
-  -> OpenAIProvider or MockProvider
+  -> AES-GCM credential decryption (OpenAI/Gemini route) or deterministic mock fallback
+  -> OpenAIProvider, GeminiProvider, or MockProvider
   -> normalized response or sanitized provider error
   -> durable success or provider-failure usage write
 ~~~
@@ -39,15 +39,16 @@ only safe credential metadata.
 
 Alembic head `0003` adds `provider_credentials` and `model_configs`. An enabled
 model configuration maps a public alias to a concrete provider model,
-credential, and input/output EUR prices. The OpenAI Chat Completions adapter and
-its normalized error paths pass mocked-upstream integration tests. The mock
-fallback remains deterministic for the unconfigured development seed. A live
-configured encrypted route to a deliberately non-routable HTTPS upstream also
-verified sanitized `provider_unavailable` handling, durable failure persistence
-across restart, and API/log redaction. PostgreSQL reached `0003` through a clean
-upgrade/check/downgrade/re-upgrade. A successful request to OpenAI with a
-disposable real credential has not yet been verified and is the sole Iteration
-2 acceptance gap. Rate, token, cost, and per-request maximum-token policy
+credential, and input/output EUR prices. OpenAI Chat Completions and native
+Gemini Interactions adapters and their normalized error paths pass mocked-
+upstream integration tests. The mock fallback remains deterministic for the
+unconfigured development seed. A live configured encrypted route to a
+deliberately non-routable HTTPS upstream verified sanitized
+`provider_unavailable` handling, durable failure persistence across restart,
+and API/log redaction. The Gemini adapter also completed live before and after
+backend restart with durable priced usage and exact cleanup. PostgreSQL reached
+`0003` through a clean upgrade/check/downgrade/re-upgrade. Rate, token, cost,
+and per-request maximum-token policy
 enforcement plus pre-provider blocked-event writes remain future slices.
 
 ## Target MVP architecture
@@ -310,9 +311,15 @@ connection, timeout, and response-shape failures to stable public errors without
 copying upstream bodies into client responses or logs. Configured per-million-
 token EUR rates drive estimated cost. Its request/response integration is
 verified against a mocked upstream, and its connection-failure path has been
-verified through the live Compose stack without secret leakage. A successful
-disposable real-credential smoke is still required. Multi-provider routing
-follows only after this exit gate is closed.
+verified through the live Compose stack without secret leakage.
+
+`GeminiProvider` calls the stable native Interactions endpoint with a server-side
+`x-goog-api-key`. It translates system instructions plus user/model history,
+sets `store=false` for stateless Interaction storage, ignores thought content,
+and includes reported thought tokens in completion usage and cost. Its mocked
+contract/error coverage and two live completions across restart pass without
+secret leakage. Multi-provider routing is therefore implemented; policy
+enforcement is the next boundary.
 
 ## Policy architecture
 
@@ -387,9 +394,10 @@ Local development uses Compose services for:
 - Next.js frontend
 
 `tailer.cmd` is the interactive/command-line Windows controller and `tailer.sh`
-is the Unix controller for start, stop, restart, status, logs, and configuration
-validation. `deploy/systemd/tailer.service` wraps the Unix controller for a
-rootful Docker host installed at `/opt/tailer`.
+is the Unix controller for start, stop, restart, status, logs, configuration
+validation, and explicit opt-in `gemini-smoke`. The smoke is not a startup hook.
+`deploy/systemd/tailer.service` wraps ordinary Unix lifecycle for a rootful
+Docker host installed at `/opt/tailer`.
 
 Production additionally requires:
 

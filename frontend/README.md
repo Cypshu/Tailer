@@ -43,7 +43,7 @@ The dashboard JWT is not a runtime Sub-API key. Runtime integrations must set th
 The backend now exposes metadata-only `/admin/provider-credentials` and
 `/admin/model-configs` APIs, but this frontend does not call or render them. An
 operator must use the authenticated API to configure an encrypted OpenAI
-credential and public-model alias. Provider plaintext and ciphertext must never
+or Gemini credential and public-model alias. Provider plaintext and ciphertext must never
 be added to browser state, client types, logs, or rendered responses.
 
 ## Structure
@@ -81,10 +81,9 @@ Both commands passed on 2026-08-02.
 - Usage labelled "this month" is not yet date-windowed.
 - There is no frontend component or browser end-to-end test suite.
 - The seeded runtime uses a deterministic mock fallback unless an operator has
-  configured a model route. The backend OpenAI adapter passes mocked-upstream
-  integration tests, but no disposable live credential has satisfied the exit
-  gate yet; successful live OpenAI completion is the sole remaining Iteration 2
-  acceptance gap.
+  configured a model route. The backend OpenAI and Gemini adapters pass mocked-
+  upstream integration tests, and Gemini passed live encrypted completions
+  before and after backend restart. Iteration 2 is complete.
 - No provider-credential or model-configuration UI exists.
 - Rate, token, cost, and per-key maximum-token controls remain descriptive; the
   backend does not enforce them yet.

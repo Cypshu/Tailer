@@ -20,9 +20,9 @@ FastAPI backend for the TAILER development prototype.
 - Metadata-only provider-credential and model-configuration admin APIs
 - Project-scoped public-model aliases that resolve a provider model, encrypted
   credential, and configured per-million-token EUR prices
-- An OpenAI Chat Completions adapter with sanitized timeout, connection,
-  authentication, permission, not-found, rate-limit, rejection, and malformed-
-  response failures
+- OpenAI Chat Completions and native Gemini Interactions adapters with sanitized
+  timeout, connection, authentication, permission, not-found, rate-limit,
+  rejection, and malformed-response failures
 - Measured latency and durable success/provider-failure usage events, including
   a stable `error_code` for failures
 - Deterministic `MockProvider` fallback when the development seed has no model route
@@ -35,8 +35,9 @@ Development limitations:
 - pre-provider blocked requests do not yet create audit events;
 - Redis is not used by active policy code;
 - provider/model management has no frontend;
-- the OpenAI implementation has passed mocked-upstream integration tests, but
-  the disposable real-credential exit smoke has not been completed.
+- both provider implementations have passed mocked-upstream integration tests;
+  Gemini also passed the disposable live pipeline before and after restart.
+  OpenAI-specific live success remains optional additional coverage.
 
 ## Run locally
 
@@ -88,7 +89,7 @@ app/
   main.py            app, CORS, routers, liveness/readiness
   models.py          Pydantic API schemas
   models_db.py       SQLAlchemy schemas
-  providers.py       provider protocol, MockProvider, and OpenAI adapter
+  providers.py       provider protocol plus Mock, OpenAI, and Gemini adapters
   serialization.py   domain-to-API mappings
   services.py        application behavior and transactions
 alembic/
@@ -140,6 +141,7 @@ Important TAILER settings include:
   base64 AES-256 key)
 - `TAILER_CREDENTIAL_ACTIVE_KEY_VERSION`
 - `TAILER_OPENAI_BASE_URL`
+- `TAILER_GEMINI_BASE_URL`
 - `TAILER_PROVIDER_TIMEOUT_SECONDS`
 
 Dashboard tokens use the JWT-specific settings. Sub-API-key lookup computes an HMAC with `TAILER_SUB_API_KEY_PEPPER`; changing the pepper invalidates existing keys. `TAILER_SECRET_KEY` is not the provider-credential encryption key.
@@ -192,19 +194,19 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ~~~
 
-All 182 tests passed in normal and reversed file order on 2026-08-02. API cases
+All 229 tests passed in normal and reversed file order on 2026-08-02. API cases
 run against a fresh in-memory store and a fresh Alembic-migrated SQLite
 database. Coverage includes seed
 idempotency, transaction behavior, HMAC lookup, hash-at-rest, AES-GCM
 round-trips/tamper detection/rotation, metadata redaction, model resolution,
-mocked-upstream OpenAI requests and response parsing, normalized errors, and
-durable failure events. No live backend, PostgreSQL, Redis, or OpenAI service is
-required for this suite.
+mocked-upstream OpenAI and Gemini requests, native Interactions response and
+thought-token handling, normalized errors, durable failure events, and live-
+smoke orchestration safety. No live backend, PostgreSQL, Redis, or provider
+service is required for this suite.
 
 The earlier Iteration 1 checkpoint passed 121 tests in both normal and reversed
-file order and included a clean PostgreSQL 16 revision-`0002` round-trip. The
-current Iteration 2 exit gate remains open until a disposable real OpenAI
-credential succeeds through the running stack.
+file order and included a clean PostgreSQL 16 revision-`0002` round-trip.
+Iteration 2 is complete through the verified live Gemini route.
 
 ## Verified checks
 
@@ -222,6 +224,8 @@ encrypted route to a deliberately non-routable HTTPS upstream produced a
 sanitized `provider_unavailable` event that survived backend restart; API,
 database inspection, and logs exposed neither plaintext nor ciphertext, and the
 probe rows were removed. The final container intentionally uses an empty
-keyring and the deterministic mock path. Successful live OpenAI completion is
-the sole remaining Iteration 2 acceptance gap. See [testing](../docs/testing.md)
+keyring and the deterministic mock path. The opt-in Gemini pipeline also
+completed twice across backend restart, verified configured nonzero pricing and
+durable usage, scanned API/database/log surfaces for secrets, removed exact
+probe rows, and restored all four services. See [testing](../docs/testing.md)
 for the verification record.

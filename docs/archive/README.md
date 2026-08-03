@@ -2,7 +2,7 @@
 
 This directory preserves historical project notes. Archived files are not active specifications, test evidence, or task assignments.
 
-Current checkpoint (2026-08-02): the persistence iteration and secure-provider implementation are complete; a disposable live OpenAI success smoke remains pending. Use the root [task board](../../tasks.md) for live status.
+Current checkpoint (2026-08-02): Iterations 1 and 2 are complete; native Gemini Interactions passed two live completions across backend restart. Iteration 3 policy enforcement is next. Use the root [task board](../../tasks.md) for live status.
 
 The 2026-07-04 snapshot contains:
 

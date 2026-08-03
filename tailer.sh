@@ -17,6 +17,7 @@ Commands:
   status      Show Compose service status; optionally limit to services
   logs        Follow recent logs; optionally limit to services
   config      Validate the rendered Compose configuration
+  gemini-smoke Run the opt-in live Gemini pipeline using ignored .gemini_api
   help        Show this help
 
 Environment:
@@ -59,6 +60,20 @@ stop_stack() {
   compose down
 }
 
+gemini_smoke() {
+  local python_bin=""
+  if [[ -x "${SCRIPT_DIR}/backend/venv/bin/python" ]]; then
+    python_bin="${SCRIPT_DIR}/backend/venv/bin/python"
+  elif [[ -x "${SCRIPT_DIR}/backend/.venv/bin/python" ]]; then
+    python_bin="${SCRIPT_DIR}/backend/.venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  else
+    fail "Python 3 is required for the Gemini smoke pipeline."
+  fi
+  "$python_bin" -u "${SCRIPT_DIR}/scripts/gemini_smoke.py"
+}
+
 readonly COMMAND="${1:-help}"
 if (($# > 0)); then
   shift
@@ -90,6 +105,10 @@ case "$COMMAND" in
     require_compose
     compose config --quiet
     printf 'Compose configuration is valid.\n'
+    ;;
+  gemini-smoke)
+    require_compose
+    gemini_smoke
     ;;
   help|-h|--help)
     usage

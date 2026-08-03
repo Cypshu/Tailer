@@ -2,12 +2,11 @@
 
 The active documentation set is intentionally small.
 
-Current checkpoint (2026-08-02): Iteration 1 persistence is complete. Iteration
-2 secure-provider implementation and its 182-case mocked-upstream regression
-suite pass, but the iteration exit gate remains open until a disposable real
-OpenAI credential succeeds through the running stack. Migration/Compose,
-encrypted-route failure, restart durability, redaction, and log-safety checks
-now pass; live OpenAI success is the sole remaining acceptance gap.
+Current checkpoint (2026-08-02): Iterations 1 and 2 are complete. The 229-case
+suite passes in normal and reversed order, and native Gemini Interactions passed
+two live encrypted completions across backend restart with durable pricing,
+redaction, exact cleanup, and complete stack restoration. Iteration 3 policy
+enforcement is next.
 
 ## Active
 

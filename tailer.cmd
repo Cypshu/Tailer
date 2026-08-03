@@ -13,6 +13,7 @@ if /i "%~1"=="restart" goto restart
 if /i "%~1"=="status" goto status
 if /i "%~1"=="logs" goto logs
 if /i "%~1"=="config" goto config
+if /i "%~1"=="gemini-smoke" goto gemini_smoke
 if /i "%~1"=="help" goto help
 if /i "%~1"=="-h" goto help
 if /i "%~1"=="--help" goto help
@@ -61,6 +62,28 @@ if errorlevel 1 exit /b %errorlevel%
 echo Compose configuration is valid.
 exit /b 0
 
+:gemini_smoke
+call :require_compose
+if errorlevel 1 exit /b %errorlevel%
+if exist "%PROJECT_DIR%\backend\venv\Scripts\python.exe" (
+  "%PROJECT_DIR%\backend\venv\Scripts\python.exe" -u "%PROJECT_DIR%\scripts\gemini_smoke.py"
+  goto gemini_smoke_done
+)
+if exist "%PROJECT_DIR%\backend\.venv\Scripts\python.exe" (
+  "%PROJECT_DIR%\backend\.venv\Scripts\python.exe" -u "%PROJECT_DIR%\scripts\gemini_smoke.py"
+  goto gemini_smoke_done
+)
+where py >nul 2>&1
+if not errorlevel 1 (
+  py -3 -u "%PROJECT_DIR%\scripts\gemini_smoke.py"
+  goto gemini_smoke_done
+)
+echo TAILER: Python 3 is required for the Gemini smoke pipeline. 1>&2
+exit /b 1
+
+:gemini_smoke_done
+exit /b %errorlevel%
+
 :start_stack
 call :ensure_environment
 if errorlevel 1 exit /b %errorlevel%
@@ -104,10 +127,12 @@ echo   3. Restart
 echo   4. Status
 echo   5. Logs
 echo   6. Validate configuration
+echo   7. Run live Gemini smoke
 echo   0. Exit
 echo.
-choice /C 1234560 /N /M "Select an action: "
-if errorlevel 7 exit /b 0
+choice /C 12345670 /N /M "Select an action: "
+if errorlevel 8 exit /b 0
+if errorlevel 7 goto menu_gemini_smoke
 if errorlevel 6 goto menu_config
 if errorlevel 5 goto menu_logs
 if errorlevel 4 goto menu_status
@@ -139,6 +164,10 @@ goto menu_pause
 
 :menu_config
 call "%~f0" config
+goto menu_pause
+
+:menu_gemini_smoke
+call "%~f0" gemini-smoke
 
 :menu_pause
 echo.
@@ -163,6 +192,7 @@ echo   restart     Stop, rebuild, and start the complete stack
 echo   status      Show Compose service status; optionally limit to services
 echo   logs        Follow recent logs; optionally limit to services
 echo   config      Validate the rendered Compose configuration
+echo   gemini-smoke Run the opt-in live Gemini pipeline using ignored .gemini_api
 echo   help        Show this help
 echo.
 echo Environment:

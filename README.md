@@ -2,9 +2,9 @@
 
 TAILER is a development-stage LLM access gateway. It gives dashboard users managed Sub-API keys, exposes an OpenAI-style chat endpoint, and records durable usage without sharing an upstream provider credential.
 
-> Current maturity: secure-provider development prototype with mocked-upstream
-> verification. The Iteration 2 exit gate remains open until a disposable real
-> OpenAI credential completes an operator smoke test.
+> Current maturity: secure-provider development prototype. Iteration 2 is
+> complete: native Gemini Interactions produced live completions before and
+> after a backend restart through TAILER's encrypted provider pipeline.
 
 ## What works
 
@@ -21,20 +21,23 @@ TAILER is a development-stage LLM access gateway. It gives dashboard users manag
 - Versioned AES-256-GCM encryption for upstream credentials, bound to credential,
   project, provider, and key version through authenticated associated data
 - Metadata-only admin APIs for provider credentials and model configurations
-- Public-model alias routing to an OpenAI Chat Completions adapter, with
-  per-million-token EUR pricing supplied by the model configuration
+- Public-model alias routing to OpenAI Chat Completions or native Gemini
+  Interactions, with per-million-token EUR pricing supplied by the model
+  configuration
 - Deterministic mock-provider fallback for the unconfigured development seed
 - Measured latency plus durable success and sanitized provider-failure usage events
-- A 182-case regression suite, including mocked-upstream OpenAI integration tests,
-  that runs API contracts against both repository adapters
+- A 229-case regression suite, including mocked-upstream OpenAI and Gemini
+  integration tests, that runs API contracts against both repository adapters
+- An opt-in live Gemini pipeline that verifies encrypted routing, restart
+  durability, metering, redaction, exact cleanup, and canonical-stack restoration
 - Docker Compose health checks and dependency sequencing for PostgreSQL, Redis, backend, and frontend
 
 ## Important limitations
 
 - Demo passwords are user display names, and the checked-in configuration values are development defaults.
 - Deterministic demo bearer keys exist in source for repeatable testing. Do not use them outside development.
-- The OpenAI adapter has passed mocked-upstream integration tests, but no live
-  request with a disposable real OpenAI credential has been verified yet.
+- Live success is verified with Gemini 3.6 Flash. OpenAI-specific live success
+  remains unverified, but it is no longer the provider-neutral iteration gate.
 - Provider credential and model management are backend APIs only; the frontend
   has no management screen for them.
 - Redis is started by Compose but request-rate, token, budget, and per-key maximum-token limits are not enforced.
@@ -46,7 +49,7 @@ TAILER is a development-stage LLM access gateway. It gives dashboard users manag
 
 Do not use the current prototype with long-lived or production credentials or
 with untrusted clients. Use only a disposable provider credential for the
-documented operator exit smoke.
+documented opt-in live smoke.
 
 ## Quick start
 
@@ -71,7 +74,11 @@ chmod +x tailer.sh
 ./tailer.sh logs
 ~~~
 
-Both controllers support `start`, `stop`, `restart`, `status`, `logs`, `config`, and `help`. They create `.env` from `.env.example` when needed, build the stack, and wait for service health. Direct `docker compose` commands remain available.
+Both controllers support `start`, `stop`, `restart`, `status`, `logs`, `config`,
+`gemini-smoke`, and `help`. They create `.env` from `.env.example` when needed,
+build the stack, and wait for service health. `gemini-smoke` is an explicit,
+external paid test and is never part of normal startup. Direct `docker compose`
+commands remain available.
 
 Open:
 
@@ -106,12 +113,12 @@ These credentials are intentionally insecure fixtures.
 
 ## Verified baseline
 
-On 2026-08-02:
+Verified through 2026-08-02:
 
 - Frontend lint and production build passed.
-- The Iteration 2 backend suite passed all 182 tests in normal and reversed file
-  order, including encryption, metadata-redaction, routing, mocked-upstream
-  OpenAI, normalized-error, and failure-ledger coverage.
+- The Iteration 2 backend suite passed all 229 tests in normal and reversed file
+  order, including encryption, metadata redaction, OpenAI/Gemini routing,
+  adapter contracts, orchestration safety, normalized errors, and durable usage.
 - Every API characterization runs against a fresh in-memory store and a fresh Alembic-migrated SQLite database.
 - The automated migration suite reaches Alembic head `0003`, which adds
   `provider_credentials` and `model_configs`.
@@ -130,11 +137,15 @@ On 2026-08-02:
   HTTPS upstream produced sanitized `provider_unavailable`, persisted its
   `error_code` across backend restart, and exposed no plaintext/ciphertext in
   APIs or logs. Its exact rows were removed.
+- The ignored `.gemini_api` pipeline discovered Gemini 3.6 Flash, encrypted its
+  disposable credential, completed through TAILER before and after backend
+  restart, verified two durable metered success events and API/database/log
+  redaction, removed the exact probe rows, and restored all four services.
 - A final `tailer.cmd restart` left all four services healthy at database head
   `0003`; the deterministic mock completion passed and the container was
   intentionally returned to an empty credential keyring.
-- The real-provider exit gate is still open: a disposable, environment-supplied
-  OpenAI credential has not yet completed a successful live request. This is
-  the sole remaining Iteration 2 acceptance gap.
+- Iteration 2's one-real-provider gate is complete. Iteration 3 policy
+  enforcement is the next planned slice; a live OpenAI-specific request remains
+  optional additional adapter coverage.
 
 Consult the [task board](tasks.md) for the next implementation slice and remaining risks.

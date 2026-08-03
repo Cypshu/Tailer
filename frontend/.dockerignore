@@ -4,6 +4,7 @@ out/
 build/
 coverage/
 .env*
+.gemini_api
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

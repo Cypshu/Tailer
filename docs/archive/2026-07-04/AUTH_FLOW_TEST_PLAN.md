@@ -2,7 +2,7 @@
 
 > Archived manual plan from 2026-07-04. Unchecked cases are not test evidence; use the active testing guide.
 >
-> Current checkpoint (2026-08-02): Iteration 1 persistence is complete and Iteration 2 implementation is complete; a disposable live OpenAI success smoke remains pending. See the root [task board](../../../tasks.md).
+> Current checkpoint (2026-08-02): Iterations 1 and 2 are complete; native Gemini Interactions passed two live completions across backend restart. Iteration 3 policy enforcement is next. See the root [task board](../../../tasks.md).
 
 ## Overview
 This document outlines the comprehensive test plan for verifying the auth scaffolding works end-to-end.

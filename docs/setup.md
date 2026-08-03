@@ -2,7 +2,8 @@
 
 TAILER runs as a durable PostgreSQL-backed development prototype. The seeded
 development path uses a deterministic mock fallback; operators can create an
-encrypted credential and model alias for the OpenAI Chat Completions adapter.
+encrypted credential and model alias for the OpenAI Chat Completions or native
+Gemini Interactions adapter.
 Redis is present for future policy counters but is not consumed by active
 request code.
 
@@ -27,6 +28,7 @@ Double-click `tailer.cmd` to open its interactive menu, or use command mode from
 .\tailer.cmd logs backend frontend
 .\tailer.cmd restart
 .\tailer.cmd stop
+.\tailer.cmd gemini-smoke  # explicit external/paid verification only
 ~~~
 
 ### Bash controller
@@ -38,6 +40,7 @@ chmod +x tailer.sh
 ./tailer.sh logs backend frontend
 ./tailer.sh restart
 ./tailer.sh stop
+./tailer.sh gemini-smoke   # explicit external/paid verification only
 ~~~
 
 Both controllers support:
@@ -50,6 +53,7 @@ Both controllers support:
 | `status` | Show Compose service status |
 | `logs [service...]` | Follow recent logs, optionally for selected services |
 | `config` | Validate the rendered Compose configuration |
+| `gemini-smoke` | Run the loopback-only disposable Gemini pipeline; never part of startup |
 | `help` | Show command help |
 
 `TAILER_COMPOSE_WAIT_TIMEOUT` controls the health wait in seconds (default `300`), and `TAILER_COMPOSE_LOG_TAIL` controls initial log lines (default `200`).
@@ -100,6 +104,7 @@ Store the generated output in a secret manager or local untracked `.env`:
 TAILER_CREDENTIAL_ENCRYPTION_KEYS={"v1":"<generated URL-safe base64 AES-256 key>"}
 TAILER_CREDENTIAL_ACTIVE_KEY_VERSION=v1
 TAILER_OPENAI_BASE_URL=https://api.openai.com/v1
+TAILER_GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1
 TAILER_PROVIDER_TIMEOUT_SECONDS=30
 ~~~
 
@@ -111,11 +116,34 @@ resolution fail closed if the registry is empty, malformed, missing the active
 version, or unable to authenticate a stored value. An empty registry is suitable
 only for the mock path.
 
-Do not put the upstream OpenAI API key itself in a Compose file or checked-in
+Do not put an upstream provider API key itself in a Compose file or checked-in
 environment file. Supply it once to `POST /admin/provider-credentials`; the API
 returns only metadata and persistence stores authenticated ciphertext plus a
 safe suffix hint. See the environment-only disposable credential flow in the
 [testing guide](testing.md).
+
+### Opt-in live Gemini pipeline
+
+This verification mutates the local development database, makes model-discovery
+plus two paid/external completion calls, restarts services, then removes its
+exact rows and restores the canonical empty-keyring stack. It is loopback-only
+and refuses transient Compose overrides or a database that already contains
+provider credentials/model routes;
+run it only while you have exclusive use of the development stack.
+
+Put one disposable Gemini API key in the ignored root `.gemini_api` file. Use a
+single raw line (or `GEMINI_API_KEY=<value>`), never print it, and on Unix restrict
+the file before running:
+
+~~~bash
+chmod 600 .gemini_api
+./tailer.sh gemini-smoke
+~~~
+
+On Windows, run `.\tailer.cmd gemini-smoke`. The key remains in the host runner,
+is submitted once through the credential API, and is never placed in Docker
+environment variables, build contexts, command arguments, or checked-in files.
+Delete the file and rotate/revoke the disposable key after verification.
 
 ## Linux systemd service
 
@@ -256,15 +284,16 @@ docker compose config --quiet
 
 On Windows, use `.\tailer.cmd config`. See [testing](testing.md) for the automated suite, dated results, and optional manual smoke flow.
 
-The current backend verification is 182 passing tests in normal and reversed
-file order. This includes a mocked upstream for the OpenAI adapter; it is not
-evidence of a successful live OpenAI request. A live configured encrypted route
+The current backend verification is 229 passing tests in normal and reversed
+file order. This includes mocked upstreams for the OpenAI and Gemini adapters.
+A live configured encrypted route
 to a deliberately non-routable HTTPS upstream verified sanitized
 `provider_unavailable` handling, durable `error_code` persistence across backend
 restart, and API/log redaction. A final `tailer.cmd restart` left all four
 services healthy at `0003`, with a passing mock completion and an intentionally
-empty keyring. Successful completion using a disposable real OpenAI credential
-is the sole remaining Iteration 2 acceptance gap.
+empty keyring. The loopback-only Gemini pipeline then completed twice across
+restart, verified durable priced usage and secret redaction, removed exact probe
+rows, and restored all four services. Iteration 2 is complete.
 
 ## Common problems
 

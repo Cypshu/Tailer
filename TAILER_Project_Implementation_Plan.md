@@ -23,12 +23,12 @@ calls, and inspect durable usage.
 
 ## Verified current baseline
 
-Verified on 2026-08-02 in the Iteration 2 working tree:
+Verified through 2026-08-02 in the completed Iteration 2 working tree:
 
 ### Application and tests
 
 - Frontend lint and production build pass.
-- The 182-case backend suite passes in normal and reversed file order.
+- The 229-case backend suite passes in normal and reversed file order.
 - API characterization runs through both the copy-on-write memory adapter and a
   fresh Alembic-migrated SQLAlchemy/SQLite adapter.
 - PostgreSQL is the default runtime adapter for active auth, admin, user,
@@ -41,8 +41,10 @@ Verified on 2026-08-02 in the Iteration 2 working tree:
   invocation.
 - Versioned AES-256-GCM provider credentials and model aliases persist behind
   metadata-only admin APIs. Master-key values are redacted by settings objects.
-- The OpenAI Chat Completions adapter uses backend-only credentials, configured
-  provider model/pricing, HTTPS, and sanitized typed errors.
+- The OpenAI Chat Completions and native Gemini Interactions adapters use
+  backend-only credentials, configured provider model/pricing, HTTPS, and
+  sanitized typed errors. Gemini requests set `store=false`, and completion
+  accounting includes reported thought tokens.
 - Successful calls and normalized provider failures record durable usage; no
   database transaction remains open during provider I/O.
 
@@ -65,12 +67,17 @@ Verified on 2026-08-02 in the Iteration 2 working tree:
   boundary against a deliberately unavailable HTTPS target. Its sanitized
   failure and stable error code survived restart; ciphertext-at-rest and log
   redaction checks passed, and every probe row was removed.
+- A disposable Gemini 3.6 Flash credential completed through the public runtime
+  route before and after backend restart. Two metered success rows, configured
+  nonzero pricing, secret redaction, exact cleanup, and four-service canonical
+  restoration passed.
 
 ### Operator surface
 
-- `tailer.cmd` provides an interactive Windows menu and command mode.
+- `tailer.cmd` provides an interactive Windows menu and command mode, including
+  an explicit opt-in `gemini-smoke` command.
 - `tailer.sh` provides Unix start, stop, restart, status, logs, configuration,
-  and help commands.
+  `gemini-smoke`, and help commands.
 - `deploy/systemd/tailer.service` delegates boot lifecycle to `tailer.sh` for a
   rootful Docker host installed at `/opt/tailer`.
 - Windows and Bash controller checks passed. The unit still needs one live
@@ -79,10 +86,10 @@ Verified on 2026-08-02 in the Iteration 2 working tree:
 
 ## Current limitations
 
-- The OpenAI adapter and encrypted credential route are implemented, but a
-  successful call with a disposable real OpenAI credential has not been run in
-  this environment. The final running stack intentionally has no credential
-  keyring configured and therefore fails credential creation closed.
+- The provider-neutral live gate is complete through Gemini. OpenAI-specific
+  live success has not been run and remains optional adapter coverage. The
+  final running stack intentionally has no credential keyring configured and
+  therefore fails credential creation closed.
 - Demo passwords, deterministic demo bearer keys, and example secrets make the
   current system development-only.
 - Request-rate, request-count, token, budget, and per-key maximum-token policies
@@ -164,10 +171,9 @@ Exit gate result:
 
 Gate: passed.
 
-## Iteration 2 — secure real-provider gateway (acceptance pending)
+## Iteration 2 — secure real-provider gateway
 
-Status: implementation complete on 2026-08-02; one external live-success gate
-remains open.
+Status: complete on 2026-08-02.
 
 Goal: route one real provider safely without exposing its credential.
 
@@ -182,34 +188,36 @@ Delivered:
    model-configuration APIs.
 4. Public model-alias resolution to an active credential, provider model, and
    exact per-million-token EUR pricing.
-5. An HTTPS OpenAI Chat Completions adapter behind the provider boundary while
-   retaining deterministic `MockProvider` injection.
+5. HTTPS OpenAI Chat Completions and native Gemini Interactions adapters behind
+   the provider boundary while retaining deterministic `MockProvider` injection.
 6. Sanitized timeout, connectivity, authentication, permission, not-found,
    rate-limit, rejected-request, and invalid-response failures.
 7. Separate durable success/failure usage transactions with stable error codes.
 8. Cross-adapter encryption, redaction, routing, adapter, failure, transaction,
-   migration, deterministic-mock, HTTPS, and log-safety tests plus an
-   environment-only operator smoke procedure.
+   migration, deterministic-mock, HTTPS, and log-safety tests plus a loopback-
+   only opt-in Gemini smoke with exact cleanup and full-stack restoration.
 
 Exit gate result:
 
 - passed: database, API, frontend payloads, and logs contain no raw provider or
   Sub-API secret;
-- pending: one configured completion against the real OpenAI service, because no
-  disposable provider credential was available;
+- passed: one configured real-provider completion, repeated across backend
+  restart, through native Gemini Interactions;
 - passed: provider errors are normalized and durable;
 - passed: `MockProvider` remains deterministic for tests;
 - passed: all earlier regression, migration, Compose, and restart gates remain
   green.
 
-Task 7 and this iteration remain open only for the disposable live OpenAI
-success smoke. Do not start the policy iteration by treating mocked-upstream or
-unavailable-upstream evidence as that success.
+Task 7 and this iteration are complete. The live Gemini success—not the mocked
+or unavailable-upstream evidence—closes the real-provider gate. Iteration 3 is
+the next ready slice.
 
 The Sub-API-key HMAC/show-once work formerly scheduled here was pulled forward
 and completed in Iteration 1.
 
 ## Iteration 3 — enforced policy
+
+Status: ready; not started.
 
 Goal: prevent unauthorized spend before provider calls.
 

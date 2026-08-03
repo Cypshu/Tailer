@@ -29,7 +29,7 @@ from app.models import (
     CreateProviderCredentialRequest,
     CreateUserRequest,
 )
-from app.providers import OpenAIProvider, Provider, get_provider
+from app.providers import GeminiProvider, OpenAIProvider, Provider, get_provider
 from app.repositories.base import PersistenceConflictError, UnitOfWorkFactory
 
 
@@ -436,7 +436,7 @@ class TailerService:
                 provider_model=config.provider_model,
             )
 
-        if config.provider != "openai":
+        if config.provider not in {"openai", "gemini"}:
             raise ConfigurationError("Configured provider is unsupported")
         if (
             credential is None
@@ -457,16 +457,20 @@ class TailerService:
                 project_id=credential.project_id,
                 provider=credential.provider,
             )
-            provider = OpenAIProvider(
+            provider_class = (
+                OpenAIProvider if config.provider == "openai" else GeminiProvider
+            )
+            provider_base_url = (
+                settings.openai_base_url
+                if config.provider == "openai"
+                else settings.gemini_base_url
+            )
+            provider = provider_class(
                 raw_credential,
-                base_url=settings.openai_base_url,
+                base_url=provider_base_url,
                 timeout_seconds=settings.provider_timeout_seconds,
-                input_cost_per_million_eur=(
-                    config.input_cost_per_million_eur
-                ),
-                output_cost_per_million_eur=(
-                    config.output_cost_per_million_eur
-                ),
+                input_cost_per_million_eur=(config.input_cost_per_million_eur),
+                output_cost_per_million_eur=(config.output_cost_per_million_eur),
             )
         except (
             CredentialDecryptionError,

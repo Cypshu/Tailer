@@ -4,7 +4,7 @@ Last verified: 2026-08-02
 
 ## Current testing status
 
-TAILER has a 182-case backend regression suite under `backend/tests/`.
+TAILER has a 229-case backend regression suite under `backend/tests/`.
 
 - `backend/requirements-dev.txt` includes compatible `pytest` and `httpx` versions plus runtime requirements.
 - FastAPI `TestClient` exercises the API without starting a live server.
@@ -17,10 +17,13 @@ TAILER has a 182-case backend regression suite under `backend/tests/`.
 - Credential tests cover AES-256-GCM round-trips, unique nonces, authenticated
   associated-data binding, tamper rejection, missing-version failure, safe
   hints, and version rotation.
-- Provider tests exercise OpenAI Chat Completions requests against a mocked
-  upstream, strict response parsing, configured alias/pricing resolution,
-  metadata-only admin responses, sanitized error mapping, secret-safe logs, and
-  durable provider-failure events with stable `error_code` values.
+- Provider tests exercise OpenAI Chat Completions and native Gemini Interactions
+  against mocked upstreams, strict response parsing, thought-token accounting,
+  configured alias/pricing resolution, metadata-only admin responses, sanitized
+  error mapping, secret-safe logs, and durable provider-failure events with
+  stable `error_code` values. Smoke-orchestration tests cover loopback pinning,
+  timeout validation, full-stack health, exact cleanup, secret exclusion from
+  Compose, and cleanup retry.
 - The standalone migration test reaches Alembic revision `0003`, checks schema drift, and performs upgrade/downgrade/re-upgrade.
 - `.tailer-runs/` is generated local smoke output, not the tracked regression layer.
 
@@ -48,7 +51,7 @@ python -m pytest -q
 python -m pytest -q tests/test_runtime.py tests/test_repositories.py tests/test_migrations.py tests/test_auth.py tests/test_admin.py
 ~~~
 
-Both pytest orders passed on 2026-08-02: 182 tests in normal order and 182 in
+Both pytest orders passed on 2026-08-02: 229 tests in normal order and 229 in
 reversed file order, using `cryptography` 49.0.0.
 
 The remaining warnings are understood third-party/dialect warnings:
@@ -63,9 +66,12 @@ docker compose config --quiet
 ./tailer.sh config
 ./tailer.sh start
 ./tailer.sh status
+./tailer.sh gemini-smoke  # explicit paid/external verification only
 ~~~
 
-On Windows, use `.\tailer.cmd config`, `.\tailer.cmd start`, and `.\tailer.cmd status`.
+On Windows, use `.\tailer.cmd config`, `.\tailer.cmd start`,
+`.\tailer.cmd status`, and the explicit `.\tailer.cmd gemini-smoke` verification
+command.
 
 At the Iteration 1 checkpoint, Docker Engine 29.6.1 and Compose 5.2.0 passed an
 isolated full build/start. PostgreSQL, Redis, backend, and frontend all became
@@ -97,9 +103,12 @@ removed.
 
 A final canonical `tailer.cmd restart` left PostgreSQL, Redis, backend, and
 frontend healthy, with the database at `0003` and a passing deterministic mock
-completion. The final backend container intentionally has an empty credential
-keyring. A successful request using a disposable real OpenAI credential is the
-sole remaining Iteration 2 acceptance gap.
+completion. The loopback-only Gemini pipeline subsequently discovered Gemini
+3.6 Flash, completed through TAILER before and after backend restart, verified
+two durable success events with nonzero configured pricing, checked API,
+database, and logs for secrets, removed exact probe rows, and restored all four
+services. The final backend container intentionally has an empty credential
+keyring. Iteration 2 is complete.
 
 The systemd paths, ordering, and lifecycle semantics were reviewed, but the unit
 was not started or checked with `systemd-analyze` because the available WSL1
@@ -235,11 +244,47 @@ The keyring described in [setup](setup.md#provider-credential-encryption) must b
 configured before credential creation. Without it, creation fails closed with
 HTTP 503 and does not add a row.
 
-### 8. Disposable real-OpenAI exit smoke
+### 8. Opt-in live Gemini pipeline
 
-This is the remaining Iteration 2 exit gate. Run it only against a disposable
-development stack/database and with a disposable OpenAI API key. The automated
-suite substitutes a mocked upstream and therefore does not satisfy this gate.
+Run this only with exclusive use of a disposable development stack. It performs
+model discovery and two paid/external completions, temporarily recreates the
+backend/frontend with a generated credential-encryption key, and restarts the
+backend between calls. The runner is pinned to `http://127.0.0.1:8000` and
+refuses transient Compose overrides, an existing credential keyring, or a
+provider/model configuration.
+
+Put one disposable key on a single line in the ignored root `.gemini_api` file.
+On Unix, require private permissions. Never print or copy the value into Docker,
+an environment file, or a command argument:
+
+~~~bash
+chmod 600 .gemini_api
+./tailer.sh gemini-smoke
+~~~
+
+On Windows:
+
+~~~powershell
+.\tailer.cmd gemini-smoke
+~~~
+
+Success means all nine stages pass: dynamic Flash-model discovery, clean
+exclusive baseline, four-service health with an ephemeral keyring, encrypted
+metadata-only credential storage, show-once Sub-API key creation, a live
+user-visible completion, a second user-visible completion after backend restart,
+durable token/cost and redaction checks, captured-ID plus project/provider-
+scoped marker cleanup, cleanup retry verification, and complete canonical-stack
+restoration. The upstream key never enters Docker
+environment variables/build contexts/arguments, and the final backend has an
+empty keyring. Delete `.gemini_api` and rotate/revoke the disposable key after
+testing.
+
+### 9. Optional OpenAI-specific smoke
+
+This is optional provider-specific coverage; Gemini already satisfies Iteration
+2's one-real-provider gate. Run it only against a disposable development
+stack/database and with a disposable OpenAI API key. The automated suite uses a
+mocked upstream for OpenAI success behavior.
 
 The Bash outline below keeps the provider secret out of command literals and
 files. It reads the secret without echo, sends JSON on stdin, unsets the
@@ -383,6 +428,9 @@ The current suite covers:
   plaintext or ciphertext response fields
 - model-alias/provider-model routing and configured per-million-token EUR pricing
 - OpenAI Chat Completions request/response translation against a mocked upstream
+- native Gemini Interactions translation, `store=false`, system/user/model
+  history, thought-token accounting, incomplete thought-only responses, and
+  deterministic IDs for unstored interactions
 - sanitized timeout, availability, authentication, permission, not-found,
   rate-limit, request-rejection, and malformed-response errors
 - durable zero-token provider-failure events with stable `error_code` values
@@ -395,8 +443,8 @@ The current suite covers:
 
 - No frontend component or browser end-to-end suite exists.
 - No provider-credential or model-configuration management frontend exists.
-- The OpenAI adapter has mocked-upstream integration coverage, but the
-  disposable real-credential smoke has not succeeded yet; Iteration 2 remains open.
+- OpenAI-specific live success remains optional additional adapter coverage;
+  native Gemini supplied the completed provider-neutral live gate.
 - Redis/concurrency quota tests await policy enforcement.
 - Provider-failure audit tests exist; pre-provider blocked-event audit tests
   await that durable event type.

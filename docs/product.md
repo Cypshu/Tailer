@@ -1,11 +1,10 @@
 # TAILER Product Charter
 
-> Delivery checkpoint (2026-08-02): persistence is complete. The secure-provider
-> implementation and mocked-upstream tests pass, but the iteration remains open
-> until a disposable real OpenAI credential succeeds through the running stack.
-> Persistence, restart durability, encrypted routing, sanitized failure
-> metering, redaction, and log-safety checks now pass; live OpenAI success is the
-> sole remaining Iteration 2 acceptance gap.
+> Delivery checkpoint (2026-08-02): persistence and the secure-provider
+> iteration are complete. Native Gemini Interactions passed live encrypted
+> completions before and after backend restart with durable priced usage,
+> redaction, exact cleanup, and complete stack restoration. Policy enforcement
+> is the next iteration.
 > This charter describes the target product; use the root [task board](../tasks.md)
 > for implemented status.
 
@@ -70,8 +69,9 @@ A client is any HTTP-capable program using a Sub-API key. TAILER remains languag
 
 The current implementation encrypts provider credentials with a versioned
 AES-256-GCM keyring, exposes only metadata through admin APIs, routes configured
-model aliases to the OpenAI Chat Completions adapter, and durably records
-sanitized provider failures with stable error codes. It does not yet enforce
+model aliases to OpenAI Chat Completions or native Gemini Interactions, and
+durably records sanitized provider failures with stable error codes. The Gemini
+route has also passed the live two-completion restart pipeline. It does not yet enforce
 rate, token, cost, or per-request maximum-token policies, and requests blocked
 before provider I/O are not yet persisted as audit events. The frontend also
 has no provider-management screen. The implementation plan treats these as
@@ -122,10 +122,10 @@ The MVP succeeds when a new operator can:
 8. verify a disallowed or over-budget request never reaches the provider;
 9. revoke the key and see subsequent requests denied.
 
-The current Iteration 2 exit gate corresponds to steps 4-7 with one disposable
-real OpenAI credential. Those paths pass automated tests against a mocked
-upstream, and the configured failure path is durable and sanitized in the live
-Compose stack, but live-provider success is not yet verified.
+Steps 4-7 are demonstrated by the disposable Gemini pipeline: encrypted
+credential creation, public-model routing, two live completions across backend
+restart, and durable metered usage. The next product gap is policy enforcement
+before provider invocation.
 
 ## Positioning
 

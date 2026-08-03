@@ -31,8 +31,8 @@ Passed on 2026-08-02:
 - `frontend: npm run lint`
 - `frontend: npm run build`
 - `backend: python -m compileall -q app tests`
-- `backend: python -m pytest -q` — 182 passed
-- `backend: reversed test-file order` — 182 passed
+- `backend: python -m pytest -q` — 229 passed
+- `backend: reversed test-file order` — 229 passed
 - `tailer.cmd config` and `docker compose config --quiet`
 - Alembic head `0003`, drift check, SQLite round-trip/scoped-FK inspection,
   legacy backfill, and clean PostgreSQL 16 upgrade/check/downgrade/re-upgrade
@@ -44,18 +44,22 @@ Passed on 2026-08-02:
 - live restart durability for a created user, revoked key, and usage event
 - live concurrent duplicate-user result of one 200 and one 409
 - raw creation key absent from later API reads, PostgreSQL, and backend logs
-- encrypted provider credential/model APIs, real OpenAI adapter routing, and
-  durable sanitized provider-failure usage passed isolated and live probes
+- encrypted provider credential/model APIs, OpenAI Chat Completions and native
+  Gemini Interactions routing, and durable sanitized provider-failure usage
+  passed isolated and live probes
 - live encrypted credential ciphertext, unavailable-upstream failure, restart
   durability, and log redaction passed; exact provider/key/usage probes were
   removed afterward
+- the opt-in Gemini 3.6 Flash pipeline completed before and after backend
+  restart, verified nonzero configured pricing, two durable success events,
+  secret redaction, exact cleanup, and complete canonical-stack restoration
 - probe rows/databases removed after acceptance; the development stack remains
   running and healthy
 
 Known validation limitation: the systemd unit passed structural review, but a
 live systemd/cgroup host was unavailable under WSL1. Verify installation and
-boot behavior on the target Linux host. A successful completion against the
-real OpenAI service also awaits an environment-supplied disposable credential.
+boot behavior on the target Linux host. OpenAI-specific live success is optional
+additional adapter coverage; Gemini satisfies the iteration's real-provider gate.
 
 ## Completed foundation
 
@@ -136,11 +140,11 @@ real OpenAI service also awaits an environment-supplied disposable credential.
 
 Iteration 1 exit gate: passed on 2026-08-02.
 
-## Active iteration
+## Completed Iteration 2
 
-### 7. Secure provider credential and real-adapter slice — IN PROGRESS
+### 7. Secure provider credential and real-adapter slice — COMPLETE
 
-- Status: `[~]`
+- Status: `[x]`
 - Priority: P2
 - Depends on: completed Iteration 1
 - Goal: route one real provider without exposing its credential.
@@ -167,22 +171,25 @@ Acceptance status:
 
 - [x] Database, API responses, frontend payloads, and logs contain neither the raw
   provider credential nor raw Sub-API keys.
-- [!] A configured real-provider completion succeeds through
+- [x] A configured real-provider completion succeeds through
   `/v1/chat/completions`.
 - [x] Provider failures are durable and normalized.
-- [x] All earlier regression tests remain green and the expanded 182-case suite
+- [x] All earlier regression tests remain green and the expanded 229-case suite
   passes in normal and reversed file order.
 
 Implementation, security, PostgreSQL revision `0003`, clean-image Compose,
 restart, encryption-at-rest, failure durability, and log-redaction gates pass.
-The only open exit-gate item is a successful request using an
-environment-supplied disposable OpenAI credential; no such credential was
-available in this environment. Keep Task 7 in progress until that smoke passes.
+The disposable Gemini pipeline discovered Gemini 3.6 Flash, completed through
+TAILER before and after backend restart, persisted at least two correctly priced
+success events, exposed no tested secret through API/database/log surfaces,
+removed its exact probe rows, and restored the canonical empty-keyring stack.
+Task 7 and Iteration 2 passed on 2026-08-02. A live OpenAI-specific request is
+useful additional coverage, not an acceptance blocker.
 
 The Sub-API-key hash-at-rest/show-once work originally planned here was pulled
 forward and completed in Iteration 1; do not reimplement it.
 
-## Later queue
+## Next iteration
 
 ### 8. Model policy enforcement
 

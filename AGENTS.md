@@ -32,23 +32,27 @@ Do not infer completed behavior from an architecture or archived summary.
   and key version. Admin APIs expose metadata only.
 - Alembic head `0003` adds `provider_credentials` and `model_configs`; runtime
   model aliases resolve provider models, credentials, and configured EUR pricing.
-- `OpenAIProvider` implements Chat Completions with normalized, sanitized
+- `OpenAIProvider` implements Chat Completions and `GeminiProvider` implements
+  stable native Interactions with `store=false`. Both normalize sanitized
   failures. Provider failures are durably recorded with a stable `error_code`;
   the deterministic mock fallback remains active for the unconfigured demo seed.
 - Provider-management UI, rate limits, token budgets, cost budgets, per-key
   maximum-token enforcement, and blocked-request audit writes are not implemented.
 - Deterministic demo keys in source, display-name passwords, and development secrets make this development-only software.
-- The 182-case backend suite runs API contracts against memory and fresh
-  Alembic-migrated SQLite adapters without live services, including an OpenAI
-  adapter exercised against a mocked upstream.
+- The 229-case backend suite runs API contracts against memory and fresh
+  Alembic-migrated SQLite adapters without live services, including OpenAI and
+  Gemini adapters exercised against mocked upstreams and smoke-orchestration
+  safety tests.
 - A disposable PostgreSQL 16 round-trip reaches head `0003`. The live Compose
-  stack has also exercised encrypted routing and a durable sanitized
-  `provider_unavailable` event across restart without secret/ciphertext leakage;
-  the final stack is healthy with an intentionally empty credential keyring.
-- Iteration 2 remains open until an operator completes a disposable real-OpenAI
-  credential success smoke; this is the sole acceptance gap, and neither the
-  mocked tests nor the non-routable failure probe proves live-provider success.
-- `tailer.cmd` and `tailer.sh` are the canonical Compose lifecycle controllers. The systemd unit under `deploy/systemd/` delegates to `tailer.sh`.
+  stack has also exercised a durable sanitized `provider_unavailable` event
+  across restart without secret/ciphertext leakage.
+- The opt-in Gemini smoke completed twice through the encrypted route, across a
+  backend restart, with durable metering, redaction, exact cleanup, and complete
+  stack restoration. Iteration 2 is complete; Iteration 3 policy enforcement is
+  next. The final stack is healthy with an intentionally empty keyring.
+- `tailer.cmd` and `tailer.sh` are the canonical Compose lifecycle controllers
+  and expose the explicit `gemini-smoke` verification command. The systemd unit
+  under `deploy/systemd/` delegates ordinary lifecycle to `tailer.sh`.
 
 ## Before editing
 
@@ -70,6 +74,8 @@ The root worktree may be dirty. Never use blanket clean, reset, checkout, or rec
 ## Security invariants
 
 - Never add real provider credentials, private tokens, or production secrets.
+- `.gemini_api` is an ignored, local, disposable test input. Never print, stage,
+  copy into Docker configuration, or reuse its value as a production secret.
 - Never expose an upstream provider key to the frontend or API clients.
 - Never log provider secrets or return stored credential ciphertext. Provider
   credential list/create/revoke responses must remain metadata-only.

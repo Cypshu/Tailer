@@ -20,6 +20,9 @@ _PROVIDER_SECRET = "sk-test-provider-api-secret-never-log"
 _UPSTREAM_ERROR_SECRET = "upstream-error-body-must-not-leak"
 _PUBLIC_MODEL = "tailer-openai-integration"
 _PROVIDER_MODEL = "gpt-provider-integration-model"
+_GEMINI_PROVIDER_SECRET = "gemini-test-provider-api-secret-never-log"
+_GEMINI_PUBLIC_MODEL = "tailer-gemini-integration"
+_GEMINI_PROVIDER_MODEL = "gemini-3.6-flash"
 _KEY_VERSION = "integration-v1"
 
 
@@ -38,12 +41,13 @@ def _create_credential(
     *,
     name: str = "Integration OpenAI",
     secret: str = _PROVIDER_SECRET,
+    provider: str = "openai",
 ) -> dict[str, Any]:
     response = client.post(
         "/admin/provider-credentials",
         headers=admin_headers,
         json={
-            "provider": "openai",
+            "provider": provider,
             "name": name,
             "credential": secret,
         },
@@ -75,10 +79,14 @@ def _create_model_config(
     return response.json()
 
 
-def _allow_public_model(mutate_key, active_key) -> None:
+def _allow_public_model(
+    mutate_key,
+    active_key,
+    public_model: str = _PUBLIC_MODEL,
+) -> None:
     mutate_key(
         active_key.record.id,
-        allowed_models=[*active_key.record.allowed_models, _PUBLIC_MODEL],
+        allowed_models=[*active_key.record.allowed_models, public_model],
     )
 
 
@@ -400,6 +408,132 @@ def test_configured_alias_uses_decrypted_credential_provider_model_and_pricing(
     assert _PROVIDER_SECRET not in response.text
     assert stored_credential.ciphertext not in response.text
     assert _PROVIDER_SECRET not in caplog.text
+    assert stored_credential.ciphertext not in caplog.text
+
+
+def test_gemini_alias_uses_encrypted_credential_and_durable_usage(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    active_key,
+    mutate_key,
+    monkeypatch: pytest.MonkeyPatch,
+    uow_factory: UnitOfWorkFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _configure_encryption(monkeypatch)
+    _allow_public_model(mutate_key, active_key, _GEMINI_PUBLIC_MODEL)
+    credential = _create_credential(
+        client,
+        admin_headers,
+        name="Integration Gemini",
+        secret=_GEMINI_PROVIDER_SECRET,
+        provider="gemini",
+    )
+    _create_model_config(
+        client,
+        admin_headers,
+        credential["id"],
+        public_model=_GEMINI_PUBLIC_MODEL,
+        provider_model=_GEMINI_PROVIDER_MODEL,
+    )
+    with uow_factory() as uow:
+        stored_credential = uow.provider_credentials.get_by_id(credential["id"])
+    assert stored_credential is not None
+
+    constructor_calls: list[dict[str, Any]] = []
+
+    class FakeGeminiProvider:
+        name = "gemini"
+
+        def __init__(
+            self,
+            api_key: str,
+            *,
+            base_url: str,
+            timeout_seconds: float,
+            input_cost_per_million_eur: Decimal,
+            output_cost_per_million_eur: Decimal,
+        ) -> None:
+            constructor_calls.append(
+                {
+                    "api_key": api_key,
+                    "base_url": base_url,
+                    "timeout_seconds": timeout_seconds,
+                    "input_rate": Decimal(input_cost_per_million_eur),
+                    "output_rate": Decimal(output_cost_per_million_eur),
+                }
+            )
+            self.input_rate = Decimal(input_cost_per_million_eur)
+            self.output_rate = Decimal(output_cost_per_million_eur)
+
+        async def chat_completions(self, **kwargs: Any) -> ChatCompletionResult:
+            return ChatCompletionResult(
+                id="gemini_configured_route",
+                model=kwargs["model"],
+                choices=[
+                    ChatCompletionChoice(
+                        index=0,
+                        message=Message(
+                            role="assistant", content="Routed Gemini response"
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=ChatCompletionUsage(
+                    prompt_tokens=200_000,
+                    completion_tokens=50_000,
+                    total_tokens=250_000,
+                ),
+            )
+
+        def calculate_cost(
+            self, input_tokens: int, output_tokens: int, model: str
+        ) -> float:
+            return float(
+                (
+                    Decimal(input_tokens) * self.input_rate
+                    + Decimal(output_tokens) * self.output_rate
+                )
+                / Decimal(1_000_000)
+            )
+
+    monkeypatch.setattr("app.services.GeminiProvider", FakeGeminiProvider)
+    before_ids = _usage_ids(uow_factory)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {active_key.raw_key}"},
+        json={
+            "model": _GEMINI_PUBLIC_MODEL,
+            "messages": [{"role": "user", "content": "Use Gemini."}],
+            "max_tokens": 64,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["model"] == _GEMINI_PROVIDER_MODEL
+    assert constructor_calls == [
+        {
+            "api_key": _GEMINI_PROVIDER_SECRET,
+            "base_url": settings.gemini_base_url,
+            "timeout_seconds": settings.provider_timeout_seconds,
+            "input_rate": Decimal("2.50000000"),
+            "output_rate": Decimal("10.00000000"),
+        }
+    ]
+
+    new_ids = _usage_ids(uow_factory) - before_ids
+    assert len(new_ids) == 1
+    with uow_factory() as uow:
+        event = uow.usage.get_by_id(new_ids.pop())
+    assert event is not None
+    assert event.provider == "gemini"
+    assert event.model == _GEMINI_PUBLIC_MODEL
+    assert event.provider_model == _GEMINI_PROVIDER_MODEL
+    assert event.estimated_cost_eur == Decimal("1")
+    assert event.status == "success"
+    assert _GEMINI_PROVIDER_SECRET not in response.text
+    assert stored_credential.ciphertext not in response.text
+    assert _GEMINI_PROVIDER_SECRET not in caplog.text
     assert stored_credential.ciphertext not in caplog.text
 
 

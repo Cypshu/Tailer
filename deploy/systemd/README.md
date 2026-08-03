@@ -37,17 +37,20 @@ For a real-provider route, configure the versioned
 `TAILER_CREDENTIAL_ENCRYPTION_KEYS` JSON registry and
 `TAILER_CREDENTIAL_ACTIVE_KEY_VERSION` there with mode `0600`; never commit the
 keyring. Keep every version referenced by an existing credential row. Do not put
-an upstream OpenAI API key in this file: submit a disposable key through the
+an upstream provider API key in this file: submit a disposable key through the
 metadata-only admin credential API after the service is ready.
 
 Backend startup automatically upgrades through Alembic head `0003`, including
 `provider_credentials` and `model_configs`, before seeding and serving. The
-The OpenAI adapter has mocked-upstream success coverage and a live Compose
-connection-failure probe. Neither a successful disposable real-OpenAI smoke nor
-revision-`0003` operation under this systemd unit has been verified. Compose
-validation outside systemd does reach `0003` and exercises the adapter's
-sanitized failure path. The validation caveat at the top therefore still
-applies.
+OpenAI adapter has mocked-upstream success coverage and a live Compose
+connection-failure probe. Native Gemini Interactions has also passed two live
+Compose completions across backend restart at revision `0003`. Operation under
+this installed systemd unit itself remains unverified, so the validation caveat
+at the top still applies.
+
+`tailer.sh gemini-smoke` is a manual, paid/external verification command using
+the ignored host-only `.gemini_api` file. It is intentionally not part of
+`ExecStart`, `ExecReload`, or boot behavior.
 
 ## Operate
 

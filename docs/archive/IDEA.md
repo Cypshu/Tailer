@@ -1,6 +1,6 @@
 # Original TAILER Idea
 
-> Archived product note. Current checkpoint (2026-08-02): Iteration 1 persistence and Iteration 2 secure-provider implementation are complete; a disposable live OpenAI success smoke remains pending. See the [product charter](../product.md) and root [task board](../../tasks.md).
+> Archived product note. Current checkpoint (2026-08-02): Iterations 1 and 2 are complete; native Gemini Interactions passed two live completions across backend restart. Iteration 3 policy enforcement is next. See the [product charter](../product.md) and root [task board](../../tasks.md).
 
 I have following idea:
 
