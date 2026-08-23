@@ -2,9 +2,9 @@
 
 TAILER is a development-stage LLM access gateway. It gives dashboard users managed Sub-API keys, exposes an OpenAI-style chat endpoint, and records durable usage without sharing an upstream provider credential.
 
-> Current maturity: secure-provider development prototype. Iteration 2 is
-> complete: native Gemini Interactions produced live completions before and
-> after a backend restart through TAILER's encrypted provider pipeline.
+> Current maturity: secure-provider development prototype. The repository
+> contains mocked-provider coverage and an explicit, opt-in live-provider smoke
+> path. Never place provider credentials in Git.
 
 ## What works
 
@@ -28,8 +28,6 @@ TAILER is a development-stage LLM access gateway. It gives dashboard users manag
 - Measured latency plus durable success and sanitized provider-failure usage events
 - A 229-case regression suite, including mocked-upstream OpenAI and Gemini
   integration tests, that runs API contracts against both repository adapters
-- An opt-in live Gemini pipeline that verifies encrypted routing, restart
-  durability, metering, redaction, exact cleanup, and canonical-stack restoration
 - Docker Compose health checks and dependency sequencing for PostgreSQL, Redis, backend, and frontend
 
 ## Important limitations
@@ -104,12 +102,10 @@ These credentials are intentionally insecure fixtures.
 
 - [Agent guide](AGENTS.md): repository rules and handoff entrypoint
 - [Active task board](tasks.md): the next executable work
-- [Implementation plan](TAILER_Project_Implementation_Plan.md): ordered delivery slices and acceptance gates
-- [Product charter](docs/product.md): product scope and invariants
-- [Architecture](docs/architecture.md): current and target technical shape
 - [Setup guide](docs/setup.md): lifecycle commands, local startup, Compose, and systemd
 - [Testing guide](docs/testing.md): verified checks and manual smoke flow
-- [Archive](docs/archive/README.md): historical snapshots that are not current sources of truth
+- Private architecture, product decisions, task state, and historical material
+  live only in the ignored local `arch/` directory.
 
 ## Verified baseline
 
@@ -137,15 +133,10 @@ Verified through 2026-08-02:
   HTTPS upstream produced sanitized `provider_unavailable`, persisted its
   `error_code` across backend restart, and exposed no plaintext/ciphertext in
   APIs or logs. Its exact rows were removed.
-- The ignored `.gemini_api` pipeline discovered Gemini 3.6 Flash, encrypted its
-  disposable credential, completed through TAILER before and after backend
-  restart, verified two durable metered success events and API/database/log
-  redaction, removed the exact probe rows, and restored all four services.
 - A final `tailer.cmd restart` left all four services healthy at database head
   `0003`; the deterministic mock completion passed and the container was
   intentionally returned to an empty credential keyring.
-- Iteration 2's one-real-provider gate is complete. Iteration 3 policy
-  enforcement is the next planned slice; a live OpenAI-specific request remains
-  optional additional adapter coverage.
+- Live-provider smoke tests are optional development checks and require a
+  disposable credential supplied only through an ignored local file.
 
 Consult the [task board](tasks.md) for the next implementation slice and remaining risks.

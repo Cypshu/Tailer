@@ -1,3 +1,5 @@
+# Private TAILER control plane and architecture
+/arch/
 # Environment variables
 .env
 .env.local
@@ -73,5 +75,8 @@ redis_data/
 # claude
 .claude/
 
-# test api
+# Local provider credentials and test artifacts
 .gemini_api
+*.gemini_api*
+copy.gemini_api.kbdx
+test.zip

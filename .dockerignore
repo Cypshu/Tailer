@@ -4,4 +4,8 @@
 !.env.example
 .git
 .claude
+arch
+*.gemini_api*
+copy.gemini_api.kbdx
+test.zip
 .tailer-runs
