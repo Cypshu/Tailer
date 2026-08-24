@@ -298,6 +298,131 @@ class SubApiKey(Base):
     usage_events = relationship("UsageEvent", back_populates="sub_api_key")
 
 
+class RequestAttempt(Base):
+    __tablename__ = "request_attempts"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('dispatch_claimed', 'succeeded', 'provider_failed', "
+            "'provider_outcome_uncertain', 'finalization_failed')",
+            name="state_allowed",
+        ),
+        CheckConstraint(
+            "(idempotency_key_digest IS NULL AND "
+            "request_fingerprint_digest IS NULL) OR "
+            "(idempotency_key_digest IS NOT NULL AND "
+            "request_fingerprint_digest IS NOT NULL)",
+            name="identity_digest_pair",
+        ),
+        CheckConstraint(
+            "idempotency_key_digest IS NULL OR "
+            "length(idempotency_key_digest) = 64",
+            name="idempotency_digest_length",
+        ),
+        CheckConstraint(
+            "request_fingerprint_digest IS NULL OR "
+            "length(request_fingerprint_digest) = 64",
+            name="fingerprint_digest_length",
+        ),
+        CheckConstraint(
+            "length(dispatch_token_digest) = 64",
+            name="dispatch_digest_length",
+        ),
+        CheckConstraint(
+            "input_tokens IS NULL OR input_tokens >= 0",
+            name="input_tokens_nonnegative",
+        ),
+        CheckConstraint(
+            "output_tokens IS NULL OR output_tokens >= 0",
+            name="output_tokens_nonnegative",
+        ),
+        CheckConstraint(
+            "total_tokens IS NULL OR total_tokens >= 0",
+            name="total_tokens_nonnegative",
+        ),
+        CheckConstraint(
+            "estimated_cost_eur IS NULL OR estimated_cost_eur >= 0",
+            name="estimated_cost_nonnegative",
+        ),
+        CheckConstraint(
+            "currency IS NULL OR "
+            "(length(currency) = 3 AND currency = upper(currency))",
+            name="currency_iso_code",
+        ),
+        CheckConstraint(
+            "(estimated_cost_eur IS NULL AND currency IS NULL) OR "
+            "(estimated_cost_eur IS NOT NULL AND currency IS NOT NULL AND "
+            "currency = 'EUR')",
+            name="cost_currency_pair",
+        ),
+        CheckConstraint(
+            "latency_ms IS NULL OR latency_ms >= 0",
+            name="latency_nonnegative",
+        ),
+        CheckConstraint(
+            "error_http_status IS NULL OR "
+            "(error_http_status >= 400 AND error_http_status <= 599)",
+            name="error_http_status_range",
+        ),
+        UniqueConstraint(
+            "sub_api_key_id",
+            "operation",
+            "idempotency_key_digest",
+            name="uq_request_attempts_identity",
+        ),
+        UniqueConstraint(
+            "id",
+            "project_id",
+            "sub_api_key_id",
+            "user_id",
+            name="uq_request_attempts_attribution",
+        ),
+        Index("ix_request_attempts_state_updated_at", "state", "updated_at"),
+        Index(
+            "ix_request_attempts_project_created_at", "project_id", "created_at"
+        ),
+        Index(
+            "ix_request_attempts_key_created_at", "sub_api_key_id", "created_at"
+        ),
+    )
+
+    id = Column(String, primary_key=True)
+    project_id = Column(String, ForeignKey("projects.id"), nullable=False)
+    sub_api_key_id = Column(String, ForeignKey("sub_api_keys.id"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    operation = Column(String, nullable=False)
+    idempotency_key_digest = Column(String(64), nullable=True)
+    request_fingerprint_digest = Column(String(64), nullable=True)
+    dispatch_token_digest = Column(String(64), nullable=False)
+    state = Column(String, nullable=False)
+    provider = Column(String, nullable=False)
+    public_model = Column(String, nullable=False)
+    provider_model = Column(String, nullable=False)
+    provider_result_id = Column(String(255), nullable=True)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    estimated_cost_eur = Column(Numeric(18, 8), nullable=True)
+    currency = Column(String(3), nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_http_status = Column(Integer, nullable=True)
+    error_public_message = Column(String(200), nullable=True)
+    error_retryable = Column(Boolean, nullable=True)
+    idempotency_expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=_utc_now, server_default=func.now(), nullable=False
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    usage_event = relationship("UsageEvent", uselist=False, viewonly=True)
+
+
 class UsageEvent(Base):
     __tablename__ = "usage_events"
     __table_args__ = (
@@ -314,6 +439,20 @@ class UsageEvent(Base):
             "length(currency) = 3 AND currency = upper(currency)",
             name="currency_iso_code",
         ),
+        ForeignKeyConstraint(
+            ["request_attempt_id", "project_id", "sub_api_key_id", "user_id"],
+            [
+                "request_attempts.id",
+                "request_attempts.project_id",
+                "request_attempts.sub_api_key_id",
+                "request_attempts.user_id",
+            ],
+            name="fk_usage_events_request_attempt_attribution",
+        ),
+        UniqueConstraint(
+            "request_attempt_id",
+            name="uq_usage_events_request_attempt_id",
+        ),
         Index("ix_usage_events_created_at", "created_at"),
         Index("ix_usage_events_project_created_at", "project_id", "created_at"),
         Index("ix_usage_events_key_created_at", "sub_api_key_id", "created_at"),
@@ -325,6 +464,7 @@ class UsageEvent(Base):
     project_id = Column(String, ForeignKey("projects.id"), nullable=False)
     sub_api_key_id = Column(String, ForeignKey("sub_api_keys.id"), nullable=False)
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    request_attempt_id = Column(String, nullable=True)
     provider = Column(String, nullable=False)  # openai, anthropic, etc.
     model = Column(String, nullable=False)  # public model alias requested by the client
     provider_model = Column(String, nullable=False)  # concrete upstream model

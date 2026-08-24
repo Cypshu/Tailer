@@ -1,13 +1,9 @@
-from datetime import datetime, timezone
 from decimal import Decimal
-import math
 from time import perf_counter
-import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from starlette.concurrency import run_in_threadpool
 
-from app.domain import UsageRecord
 from app.models import ChatCompletionRequest, ChatCompletionResponse
 from app.providers import ProviderError
 from app.repositories.dependencies import get_service
@@ -15,19 +11,40 @@ from app.services import (
     AuthenticationError,
     AuthorizationError,
     ConfigurationError,
+    RuntimeAttemptContractError,
+    RuntimeProviderFailureOutcome,
+    RuntimeSuccessOutcome,
     TailerService,
 )
 
 router = APIRouter(tags=["runtime"])
+_MAX_STORABLE_COST_EUR = Decimal("9999999999.99999999")
 
 
-def _validate_usage_values(*values: int | float) -> None:
+def _validate_token_counts(*values: int) -> None:
     if any(
-        not isinstance(value, (int, float))
+        not isinstance(value, int)
         or isinstance(value, bool)
-        or not math.isfinite(value)
         or value < 0
         for value in values
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Provider returned invalid usage data",
+        )
+
+
+def _validate_cost(value: int | float) -> None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Provider returned invalid usage data",
+        )
+    normalized = Decimal(str(value))
+    if (
+        not normalized.is_finite()
+        or normalized < 0
+        or normalized > _MAX_STORABLE_COST_EUR
     ):
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -44,10 +61,28 @@ def _provider_messages(messages: list[object]) -> list[dict]:
     ]
 
 
+def _attempt_headers(attempt_id: str | None) -> dict[str, str] | None:
+    return (
+        {"Tailer-Attempt-Id": attempt_id}
+        if attempt_id is not None
+        else None
+    )
+
+
+def _attempt_http_exception(error: RuntimeAttemptContractError) -> HTTPException:
+    return HTTPException(
+        status_code=error.status_code,
+        detail=error.detail,
+        headers=_attempt_headers(error.attempt_id),
+    )
+
+
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(
     request: ChatCompletionRequest,
+    response: Response,
     authorization: str | None = Header(default=None, alias="Authorization"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     service: TailerService = Depends(get_service),
 ):
     if not authorization or not authorization.startswith("Bearer "):
@@ -71,6 +106,16 @@ async def chat_completions(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     try:
+        identity = await run_in_threadpool(
+            service.prepare_runtime_attempt_identity,
+            key,
+            request,
+            idempotency_key,
+        )
+    except RuntimeAttemptContractError as exc:
+        raise _attempt_http_exception(exc) from exc
+
+    try:
         route = await run_in_threadpool(
             service.resolve_runtime_provider,
             key,
@@ -78,6 +123,16 @@ async def chat_completions(
         )
     except ConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    try:
+        owned_attempt = await run_in_threadpool(
+            service.claim_runtime_attempt,
+            key,
+            route,
+            identity,
+        )
+    except RuntimeAttemptContractError as exc:
+        raise _attempt_http_exception(exc) from exc
 
     provider = route.provider
     started_at = perf_counter()
@@ -90,35 +145,17 @@ async def chat_completions(
         )
     except ProviderError as exc:
         latency_ms = max(0, round((perf_counter() - started_at) * 1000))
-        failure = UsageRecord(
-            id=f"usage_{uuid.uuid4().hex[:12]}",
-            project_id=key.project_id,
-            sub_api_key_id=key.id,
-            user_id=key.owner_id,
-            provider=route.provider_name,
-            model=request.model,
-            provider_model=route.provider_model,
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            estimated_cost_eur=Decimal("0"),
-            currency="EUR",
-            latency_ms=latency_ms,
-            status=(
-                "rate_limited"
-                if exc.code == "provider_rate_limited"
-                else "failed"
-            ),
-            created_at=datetime.now(timezone.utc),
-            error_code=exc.code,
-        )
         try:
-            await run_in_threadpool(service.record_usage, failure)
-        except ConfigurationError as persistence_error:
-            raise HTTPException(
-                status_code=503,
-                detail=str(persistence_error),
-            ) from persistence_error
+            await run_in_threadpool(
+                service.finalize_runtime_provider_failure,
+                owned_attempt,
+                RuntimeProviderFailureOutcome.from_error(
+                    exc,
+                    latency_ms=latency_ms,
+                ),
+            )
+        except RuntimeAttemptContractError as persistence_error:
+            raise _attempt_http_exception(persistence_error) from persistence_error
         raise HTTPException(
             status_code=exc.status_code,
             detail={
@@ -126,42 +163,60 @@ async def chat_completions(
                 "message": exc.public_message,
                 "retryable": exc.retryable,
             },
+            headers=_attempt_headers(owned_attempt.attempt_id),
         ) from exc
     latency_ms = max(0, round((perf_counter() - started_at) * 1000))
 
-    _validate_usage_values(
-        provider_result.usage.prompt_tokens,
-        provider_result.usage.completion_tokens,
-        provider_result.usage.total_tokens,
-    )
+    try:
+        _validate_token_counts(
+            provider_result.usage.prompt_tokens,
+            provider_result.usage.completion_tokens,
+            provider_result.usage.total_tokens,
+        )
+    except HTTPException as exc:
+        await run_in_threadpool(
+            service.mark_runtime_invalid_usage,
+            owned_attempt,
+            provider_result_id=provider_result.durable_provider_result_id,
+            latency_ms=latency_ms,
+        )
+        exc.headers = _attempt_headers(owned_attempt.attempt_id)
+        raise
     estimated_cost = provider.calculate_cost(
         provider_result.usage.prompt_tokens,
         provider_result.usage.completion_tokens,
         route.provider_model,
     )
-    _validate_usage_values(estimated_cost)
-
-    usage = UsageRecord(
-        id=f"usage_{uuid.uuid4().hex[:12]}",
-        project_id=key.project_id,
-        sub_api_key_id=key.id,
-        user_id=key.owner_id,
-        provider=route.provider_name,
-        model=request.model,
-        provider_model=provider_result.model,
-        input_tokens=provider_result.usage.prompt_tokens,
-        output_tokens=provider_result.usage.completion_tokens,
-        total_tokens=provider_result.usage.total_tokens,
-        estimated_cost_eur=Decimal(str(estimated_cost)),
-        currency="EUR",
-        latency_ms=latency_ms,
-        status="success",
-        created_at=datetime.now(timezone.utc),
-    )
     try:
-        await run_in_threadpool(service.record_usage, usage)
-    except ConfigurationError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        _validate_cost(estimated_cost)
+    except HTTPException as exc:
+        await run_in_threadpool(
+            service.mark_runtime_invalid_usage,
+            owned_attempt,
+            provider_result_id=provider_result.durable_provider_result_id,
+            latency_ms=latency_ms,
+        )
+        exc.headers = _attempt_headers(owned_attempt.attempt_id)
+        raise
+
+    try:
+        await run_in_threadpool(
+            service.finalize_runtime_success,
+            owned_attempt,
+            RuntimeSuccessOutcome(
+                provider_result_id=provider_result.durable_provider_result_id,
+                input_tokens=provider_result.usage.prompt_tokens,
+                output_tokens=provider_result.usage.completion_tokens,
+                total_tokens=provider_result.usage.total_tokens,
+                estimated_cost_eur=Decimal(str(estimated_cost)),
+                currency="EUR",
+                latency_ms=latency_ms,
+            ),
+        )
+    except RuntimeAttemptContractError as exc:
+        raise _attempt_http_exception(exc) from exc
+
+    response.headers["Tailer-Attempt-Id"] = owned_attempt.attempt_id
 
     return ChatCompletionResponse(
         id=provider_result.id,

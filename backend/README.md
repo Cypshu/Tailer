@@ -7,6 +7,8 @@ FastAPI backend for the TAILER development prototype.
 - JWT login at `POST /api/auth/login`
 - JWT-protected admin and user routes
 - Sub-API-key-protected `POST /v1/chat/completions`
+- Optional `Idempotency-Key` support backed by a durable metadata-only attempt
+  fence and an atomic attempt-to-usage link
 - Validated request boundaries and active, expiry, project, allowed-model, and
   optional per-key output-token ceiling checks
 - Repository and unit-of-work boundaries shared by all active routes
@@ -24,8 +26,9 @@ FastAPI backend for the TAILER development prototype.
 - OpenAI Chat Completions and native Gemini Interactions adapters with sanitized
   timeout, connection, authentication, permission, not-found, rate-limit,
   rejection, and malformed-response failures
-- Measured latency and durable success/provider-failure usage events, including
-  a stable `error_code` for failures
+- Measured latency and, when local finalization succeeds, durable
+  success/provider-failure usage events, including a stable `error_code` for
+  failures
 - Deterministic `MockProvider` fallback when the development seed has no model route
 
 Development limitations:
@@ -34,6 +37,9 @@ Development limitations:
 - deterministic demo bearer keys and development secrets exist in source;
 - request-rate quotas and aggregate token/cost budgets are not enforced;
 - pre-provider blocked requests do not yet create audit events;
+- successful response content is not retained or replayed, and uncertain
+  attempts remain fenced without automatic recovery or a liveness guarantee;
+- requests without `Idempotency-Key` have no cross-request duplicate protection;
 - Redis is not used by active policy code;
 - provider/model management has no frontend;
 - both provider implementations have passed mocked-upstream integration tests;
@@ -98,6 +104,7 @@ alembic/
   versions/0001_initial_schema.py
   versions/0002_contract_alignment.py
   versions/0003_secure_provider_persistence.py
+  versions/0004_request_attempt_fence.py
 tests/               dual-adapter API, repository, and migration suite
 alembic.ini
 main.py
@@ -139,6 +146,8 @@ Important TAILER settings include:
 - `TAILER_JWT_ALGORITHM`
 - `TAILER_JWT_EXPIRATION_MINUTES`
 - `TAILER_SUB_API_KEY_PEPPER`
+- `TAILER_IDEMPOTENCY_KEY_PEPPER`
+- `TAILER_IDEMPOTENCY_RETENTION_DAYS` (positive integer, `30` by default)
 - `TAILER_CREDENTIAL_ENCRYPTION_KEYS` (JSON map of key version to URL-safe
   base64 AES-256 key)
 - `TAILER_CREDENTIAL_ACTIVE_KEY_VERSION`
@@ -147,6 +156,12 @@ Important TAILER settings include:
 - `TAILER_PROVIDER_TIMEOUT_SECONDS`
 
 Dashboard tokens use the JWT-specific settings. Sub-API-key lookup computes an HMAC with `TAILER_SUB_API_KEY_PEPPER`; changing the pepper invalidates existing keys. `TAILER_SECRET_KEY` is not the provider-credential encryption key.
+
+`TAILER_IDEMPOTENCY_KEY_PEPPER` must be stable and secret because it protects
+stored request-identity digests. The development default must be replaced for a
+non-development deployment. The retention value is the initial operational
+window for resolved keyed identities, not a deletion schedule; unresolved
+attempts do not expire automatically.
 
 Generate a provider-credential key from `backend/`:
 
@@ -174,11 +189,53 @@ Alembic resolves its connection through `TAILER_DATABASE_URL`. Revision `0002`
 aligns the original API/database contracts. Revision `0003` adds
 `provider_credentials` and `model_configs`, including project/provider scope,
 credential lifecycle, model-alias uniqueness, enabled state, and non-negative
-pricing constraints.
+pricing constraints. Revision `0004` adds metadata-only `request_attempts` and
+a nullable, unique, attribution-preserving attempt link on `usage_events`.
+Historical usage rows remain readable with a null link.
 
 The configured default project receives newly created keys. Key creation generates a high-entropy bearer, returns it once, and persists only its HMAC digest plus a non-secret display prefix. Runtime authorization hashes the presented bearer and performs an indexed digest lookup before policy checks.
 
-The SQLAlchemy unit of work owns one session per transaction. The in-memory adapter uses copy-on-write state, explicit commit/rollback, detached reads, and serialized transactions so its behavior matches SQL closely. Runtime authorization closes its read transaction before provider I/O and writes usage in a separate short transaction.
+The SQLAlchemy unit of work owns one session per transaction. The in-memory
+adapter uses copy-on-write state, explicit commit/rollback, detached reads, and
+serialized transactions so its behavior matches SQL closely. Runtime
+authorization and provider routing close their read transactions before
+provider I/O. A new attempt is committed in a short transaction before the
+provider call, and a resolved terminal state plus its linked usage row commit
+atomically afterward. No transaction remains open during provider I/O.
+
+`Idempotency-Key` is optional, case-sensitive, and must contain 1–255 visible
+ASCII characters without whitespace. Invalid input returns HTTP 400 and does
+not create an attempt. Once an attempt is known, handled responses include
+`Tailer-Attempt-Id`; the existing success body is unchanged. TAILER stores only
+domain-separated HMAC digests and accounting/routing/error metadata—never the
+raw idempotency key, canonical request, prompt, provider payload, or output.
+An allowlisted upstream-supplied result identifier may be retained; synthetic
+gateway IDs derived from transient content are omitted from persistence.
+
+For the same authenticated Sub-API key, `chat.completions` operation, canonical
+effective request, and `Idempotency-Key` while that identity is retained,
+TAILER dispatches at most one provider request and commits at most one linked
+usage event. Resolved identities are retained for at least the configured
+window, initially 30 days; uncertain identities stay fenced. This does not
+promise exactly-once provider execution or charging, successful response
+replay, automatic recovery, or liveness. Different credentials, payloads, or
+keys—and requests after a resolved tombstone is retired—do not share this
+protection.
+
+Expected usage flush or commit availability failures are normalized to HTTP 503
+with the fixed detail `Usage finalization is unavailable`. This applies both
+after provider success and while finalizing a provider-failure audit event. The
+endpoint does not retry the provider inside that HTTP attempt; a provider may
+already have succeeded. Tested failed-flush and pre-commit paths roll back and
+leave no usage row through either repository adapter. A retained keyed attempt
+prevents a client retry from redispatching it; the endpoint does not implement
+automatic retry, response replay, or reconciliation.
+
+Provider failures explicitly distinguish outcomes known not to have executed
+from uncertain outcomes. A definite non-execution commits one linked zero-cost
+failure event and can replay only its sanitized error envelope. An uncertain
+outcome commits no zero-cost assertion and later matching duplicates receive a
+fixed fenced response.
 
 Nullable per-key request-rate and output-token limits round-trip through both
 adapters. The output-token ceiling is enforced before provider-route resolution;
@@ -200,15 +257,19 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ~~~
 
-All 229 tests passed in normal and reversed file order on 2026-08-02. API cases
-run against a fresh in-memory store and a fresh Alembic-migrated SQLite
-database. Coverage includes seed
+All 386 tests passed in normal order on 2026-08-24; the focused I0003 runtime,
+repository, migration, and provider matrix passed all 267 tests. API cases run
+against a fresh in-memory store and a fresh Alembic-migrated SQLite database.
+Coverage includes seed
 idempotency, transaction behavior, HMAC lookup, hash-at-rest, AES-GCM
 round-trips/tamper detection/rotation, metadata redaction, model resolution,
 mocked-upstream OpenAI and Gemini requests, native Interactions response and
 thought-token handling, normalized errors, durable failure events, and live-
 smoke orchestration safety. No live backend, PostgreSQL, Redis, or provider
 service is required for this suite.
+
+The preceding I0002 baseline passed 259 tests on 2026-08-24. The earlier
+229-case suite passed in normal and reversed file order on 2026-08-02.
 
 The earlier Iteration 1 checkpoint passed 121 tests in both normal and reversed
 file order and included a clean PostgreSQL 16 revision-`0002` round-trip.

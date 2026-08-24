@@ -1,6 +1,11 @@
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from decimal import Decimal
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
+from hashlib import sha256
+import hmac
+import json
+import re
+import secrets
 import uuid
 
 from pydantic import SecretStr
@@ -19,6 +24,7 @@ from app.domain import (
     KeyRecord,
     ModelConfigRecord,
     ProviderCredentialRecord,
+    RequestAttemptRecord,
     UsageRecord,
     UserRecord,
 )
@@ -28,10 +34,22 @@ from app.models import (
     CreateModelConfigRequest,
     CreateProviderCredentialRequest,
     CreateUserRequest,
+    ChatCompletionRequest,
 )
 from app.policies import PolicyCode, evaluate_static_request_policy
-from app.providers import GeminiProvider, OpenAIProvider, Provider, get_provider
-from app.repositories.base import PersistenceConflictError, UnitOfWorkFactory
+from app.providers import (
+    GeminiProvider,
+    OpenAIProvider,
+    Provider,
+    ProviderError,
+    ProviderExecutionCertainty,
+    get_provider,
+)
+from app.repositories.base import (
+    PersistenceConflictError,
+    PersistenceWriteError,
+    UnitOfWorkFactory,
+)
 
 
 class DomainError(RuntimeError):
@@ -60,6 +78,85 @@ class ConfigurationError(DomainError):
     pass
 
 
+RuntimeErrorDetail = str | dict[str, str | bool]
+
+
+class RuntimeAttemptContractError(DomainError):
+    """A fixed, sanitized runtime-attempt response owned by the service."""
+
+    def __init__(
+        self,
+        status_code: int,
+        detail: RuntimeErrorDetail,
+        *,
+        attempt_id: str | None = None,
+    ) -> None:
+        super().__init__(detail if isinstance(detail, str) else detail["message"])
+        self.status_code = status_code
+        self.detail = detail
+        self.attempt_id = attempt_id
+
+
+@dataclass(frozen=True)
+class RuntimeAttemptIdentity:
+    operation: str
+    idempotency_key_digest: str | None
+    request_fingerprint_digest: str | None
+
+
+@dataclass(frozen=True, repr=False)
+class OwnedRuntimeAttempt:
+    record: RequestAttemptRecord
+    dispatch_token: bytes = field(repr=False)
+
+    @property
+    def attempt_id(self) -> str:
+        return self.record.id
+
+    def __repr__(self) -> str:
+        return (
+            "OwnedRuntimeAttempt("
+            f"attempt_id={self.record.id!r}, dispatch_token='<redacted>')"
+        )
+
+
+@dataclass(frozen=True)
+class RuntimeSuccessOutcome:
+    provider_result_id: str | None
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    estimated_cost_eur: Decimal
+    currency: str
+    latency_ms: int
+
+
+@dataclass(frozen=True)
+class RuntimeProviderFailureOutcome:
+    code: str
+    public_message: str
+    status_code: int
+    retryable: bool
+    execution_certainty: ProviderExecutionCertainty
+    latency_ms: int
+
+    @classmethod
+    def from_error(
+        cls,
+        error: ProviderError,
+        *,
+        latency_ms: int,
+    ) -> "RuntimeProviderFailureOutcome":
+        return cls(
+            code=error.code,
+            public_message=error.public_message,
+            status_code=error.status_code,
+            retryable=error.retryable,
+            execution_certainty=error.execution_certainty,
+            latency_ms=latency_ms,
+        )
+
+
 @dataclass(frozen=True)
 class CreatedKey:
     record: KeyRecord
@@ -72,6 +169,65 @@ class ResolvedProviderRoute:
     provider_name: str
     public_model: str
     provider_model: str
+
+
+_RUNTIME_OPERATION = "chat.completions"
+_IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[\x21-\x7e]{1,255}$")
+_PROVIDER_RESULT_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,255}$")
+_EXPECTED_PERSISTENCE_ERRORS = (
+    PersistenceConflictError,
+    PersistenceWriteError,
+)
+_ATTEMPT_UNAVAILABLE_DETAIL = "Request attempt is unavailable"
+_FINALIZATION_UNAVAILABLE_DETAIL = "Usage finalization is unavailable"
+_INVALID_USAGE_DETAIL = "Provider returned invalid usage data"
+_COST_QUANTUM = Decimal("0.00000001")
+_MAX_STORABLE_COST_EUR = Decimal("9999999999.99999999")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalized_utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _idempotency_hmac(domain: str, *parts: str) -> str:
+    pepper = settings.idempotency_key_pepper.get_secret_value().encode("utf-8")
+    payload = b"\0".join(
+        [f"tailer:{domain}:v1".encode("ascii"), *(part.encode("utf-8") for part in parts)]
+    )
+    return hmac.new(pepper, payload, sha256).hexdigest()
+
+
+def _canonical_request(request: ChatCompletionRequest) -> str:
+    return json.dumps(
+        request.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _dispatch_token_digest(token: bytes) -> str:
+    return sha256(token).hexdigest()
+
+
+def _safe_provider_result_id(value: str) -> str | None:
+    return value if _PROVIDER_RESULT_ID_PATTERN.fullmatch(value) else None
+
+
+def _attempt_response_detail(
+    *,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> dict[str, str | bool]:
+    return {"code": code, "message": message, "retryable": retryable}
 
 
 def _configured_credential_cipher() -> CredentialCipher:
@@ -508,11 +664,642 @@ class TailerService:
             provider_model=config.provider_model,
         )
 
-    def record_usage(self, usage: UsageRecord) -> None:
+    def prepare_runtime_attempt_identity(
+        self,
+        key: KeyRecord,
+        request: ChatCompletionRequest,
+        idempotency_key: str | None,
+    ) -> RuntimeAttemptIdentity:
+        if idempotency_key is None:
+            return RuntimeAttemptIdentity(
+                operation=_RUNTIME_OPERATION,
+                idempotency_key_digest=None,
+                request_fingerprint_digest=None,
+            )
+        if _IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key) is None:
+            raise RuntimeAttemptContractError(400, "Invalid Idempotency-Key")
+
+        identity = RuntimeAttemptIdentity(
+            operation=_RUNTIME_OPERATION,
+            idempotency_key_digest=_idempotency_hmac(
+                "idempotency-key",
+                key.id,
+                _RUNTIME_OPERATION,
+                idempotency_key,
+            ),
+            request_fingerprint_digest=_idempotency_hmac(
+                "request-fingerprint",
+                _RUNTIME_OPERATION,
+                _canonical_request(request),
+            ),
+        )
+        assert identity.idempotency_key_digest is not None
+        try:
+            existing = self._get_attempt_by_identity(key.id, identity)
+        except _EXPECTED_PERSISTENCE_ERRORS as exc:
+            raise RuntimeAttemptContractError(
+                503, _ATTEMPT_UNAVAILABLE_DETAIL
+            ) from exc
+        if existing is None:
+            return identity
+
+        now = _utc_now()
+        if self._attempt_identity_is_expired(existing, now):
+            try:
+                with self.factory() as uow:
+                    retired = uow.attempts.retire_expired_identity(
+                        existing.id,
+                        expected_idempotency_key_digest=(
+                            identity.idempotency_key_digest
+                        ),
+                        now=now,
+                    )
+                    if retired:
+                        uow.commit()
+            except _EXPECTED_PERSISTENCE_ERRORS:
+                try:
+                    observed = self._get_attempt_by_identity(key.id, identity)
+                except _EXPECTED_PERSISTENCE_ERRORS as read_error:
+                    raise RuntimeAttemptContractError(
+                        503,
+                        _ATTEMPT_UNAVAILABLE_DETAIL,
+                        attempt_id=existing.id,
+                    ) from read_error
+                if observed is None:
+                    return identity
+                raise RuntimeAttemptContractError(
+                    503,
+                    _ATTEMPT_UNAVAILABLE_DETAIL,
+                    attempt_id=observed.id,
+                )
+            if retired:
+                return identity
+            try:
+                existing = self._get_attempt_by_identity(key.id, identity)
+            except _EXPECTED_PERSISTENCE_ERRORS as exc:
+                raise RuntimeAttemptContractError(
+                    503,
+                    _ATTEMPT_UNAVAILABLE_DETAIL,
+                    attempt_id=existing.id,
+                ) from exc
+            if existing is None:
+                return identity
+
+        self._raise_duplicate_attempt(existing, identity)
+        raise AssertionError("Duplicate attempt handling must raise")
+
+    def claim_runtime_attempt(
+        self,
+        key: KeyRecord,
+        route: ResolvedProviderRoute,
+        identity: RuntimeAttemptIdentity,
+    ) -> OwnedRuntimeAttempt:
+        now = _utc_now()
+        dispatch_token = secrets.token_bytes(32)
+        dispatch_digest = _dispatch_token_digest(dispatch_token)
+        attempt = RequestAttemptRecord(
+            id=f"attempt_{uuid.uuid4().hex}",
+            project_id=key.project_id,
+            sub_api_key_id=key.id,
+            user_id=key.owner_id,
+            operation=identity.operation,
+            idempotency_key_digest=identity.idempotency_key_digest,
+            request_fingerprint_digest=identity.request_fingerprint_digest,
+            dispatch_token_digest=dispatch_digest,
+            state="dispatch_claimed",
+            provider=route.provider_name,
+            public_model=route.public_model,
+            provider_model=route.provider_model,
+            provider_result_id=None,
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            estimated_cost_eur=None,
+            currency=None,
+            latency_ms=None,
+            error_code=None,
+            error_http_status=None,
+            error_public_message=None,
+            error_retryable=None,
+            idempotency_expires_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            with self.factory() as uow:
+                uow.attempts.add(attempt)
+                uow.commit()
+        except PersistenceConflictError as exc:
+            if identity.idempotency_key_digest is not None:
+                try:
+                    existing = self._get_attempt_by_identity(key.id, identity)
+                except _EXPECTED_PERSISTENCE_ERRORS as read_error:
+                    raise RuntimeAttemptContractError(
+                        503, _ATTEMPT_UNAVAILABLE_DETAIL
+                    ) from read_error
+                if existing is not None:
+                    self._raise_duplicate_attempt(existing, identity)
+            raise RuntimeAttemptContractError(
+                503, _ATTEMPT_UNAVAILABLE_DETAIL
+            ) from exc
+        except PersistenceWriteError as exc:
+            try:
+                observed = self._get_attempt_by_id(attempt.id)
+            except _EXPECTED_PERSISTENCE_ERRORS as read_error:
+                raise RuntimeAttemptContractError(
+                    503, _ATTEMPT_UNAVAILABLE_DETAIL
+                ) from read_error
+            if (
+                observed is None
+                or observed.state != "dispatch_claimed"
+                or not hmac.compare_digest(
+                    observed.dispatch_token_digest, dispatch_digest
+                )
+            ):
+                raise RuntimeAttemptContractError(
+                    503, _ATTEMPT_UNAVAILABLE_DETAIL
+                ) from exc
+            attempt = observed
+
+        return OwnedRuntimeAttempt(record=attempt, dispatch_token=dispatch_token)
+
+    def finalize_runtime_success(
+        self,
+        owned: OwnedRuntimeAttempt,
+        outcome: RuntimeSuccessOutcome,
+    ) -> None:
+        outcome = self._normalize_success_outcome(outcome)
+        now = _utc_now()
+        attempt = owned.record
+        target = replace(
+            attempt,
+            state="succeeded",
+            provider_result_id=_safe_provider_result_id(
+                outcome.provider_result_id or ""
+            ),
+            input_tokens=outcome.input_tokens,
+            output_tokens=outcome.output_tokens,
+            total_tokens=outcome.total_tokens,
+            estimated_cost_eur=outcome.estimated_cost_eur,
+            currency=outcome.currency,
+            latency_ms=outcome.latency_ms,
+            error_code=None,
+            error_http_status=None,
+            error_public_message=None,
+            error_retryable=None,
+            idempotency_expires_at=self._resolved_identity_expiry(attempt, now),
+            updated_at=now,
+        )
+        usage = UsageRecord(
+            id=f"usage_{uuid.uuid4().hex[:12]}",
+            project_id=attempt.project_id,
+            sub_api_key_id=attempt.sub_api_key_id,
+            user_id=attempt.user_id,
+            provider=attempt.provider,
+            model=attempt.public_model,
+            provider_model=attempt.provider_model,
+            input_tokens=outcome.input_tokens,
+            output_tokens=outcome.output_tokens,
+            total_tokens=outcome.total_tokens,
+            estimated_cost_eur=outcome.estimated_cost_eur,
+            currency=outcome.currency,
+            latency_ms=outcome.latency_ms,
+            status="success",
+            created_at=now,
+            error_code=None,
+            request_attempt_id=attempt.id,
+        )
+        compensation = replace(
+            target,
+            state="finalization_failed",
+            error_code="usage_finalization_unavailable",
+            error_http_status=503,
+            error_public_message=_FINALIZATION_UNAVAILABLE_DETAIL,
+            error_retryable=False,
+            idempotency_expires_at=None,
+        )
+        self._finalize_runtime_attempt(
+            owned,
+            target=target,
+            usage=usage,
+            compensation=compensation,
+        )
+
+    def finalize_runtime_provider_failure(
+        self,
+        owned: OwnedRuntimeAttempt,
+        outcome: RuntimeProviderFailureOutcome,
+    ) -> None:
+        now = _utc_now()
+        attempt = owned.record
+        if outcome.execution_certainty == "not_executed":
+            target = replace(
+                attempt,
+                state="provider_failed",
+                provider_result_id=None,
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                estimated_cost_eur=Decimal("0"),
+                currency="EUR",
+                latency_ms=outcome.latency_ms,
+                error_code=outcome.code,
+                error_http_status=outcome.status_code,
+                error_public_message=outcome.public_message,
+                error_retryable=outcome.retryable,
+                idempotency_expires_at=self._resolved_identity_expiry(
+                    attempt, now
+                ),
+                updated_at=now,
+            )
+            usage = UsageRecord(
+                id=f"usage_{uuid.uuid4().hex[:12]}",
+                project_id=attempt.project_id,
+                sub_api_key_id=attempt.sub_api_key_id,
+                user_id=attempt.user_id,
+                provider=attempt.provider,
+                model=attempt.public_model,
+                provider_model=attempt.provider_model,
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                estimated_cost_eur=Decimal("0"),
+                currency="EUR",
+                latency_ms=outcome.latency_ms,
+                status=(
+                    "rate_limited"
+                    if outcome.code == "provider_rate_limited"
+                    else "failed"
+                ),
+                created_at=now,
+                error_code=outcome.code,
+                request_attempt_id=attempt.id,
+            )
+            compensation = replace(
+                target,
+                state="finalization_failed",
+                idempotency_expires_at=None,
+            )
+        else:
+            target = replace(
+                attempt,
+                state="provider_outcome_uncertain",
+                provider_result_id=None,
+                input_tokens=None,
+                output_tokens=None,
+                total_tokens=None,
+                estimated_cost_eur=None,
+                currency=None,
+                latency_ms=outcome.latency_ms,
+                error_code=outcome.code,
+                error_http_status=outcome.status_code,
+                error_public_message=outcome.public_message,
+                error_retryable=outcome.retryable,
+                idempotency_expires_at=None,
+                updated_at=now,
+            )
+            usage = None
+            compensation = target
+
+        self._finalize_runtime_attempt(
+            owned,
+            target=target,
+            usage=usage,
+            compensation=compensation,
+        )
+
+    def mark_runtime_invalid_usage(
+        self,
+        owned: OwnedRuntimeAttempt,
+        *,
+        provider_result_id: str | None,
+        latency_ms: int,
+    ) -> None:
+        now = _utc_now()
+        target = replace(
+            owned.record,
+            state="finalization_failed",
+            provider_result_id=_safe_provider_result_id(provider_result_id or ""),
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            estimated_cost_eur=None,
+            currency=None,
+            latency_ms=latency_ms,
+            error_code="provider_invalid_usage",
+            error_http_status=502,
+            error_public_message=_INVALID_USAGE_DETAIL,
+            error_retryable=False,
+            idempotency_expires_at=None,
+            updated_at=now,
+        )
+        try:
+            self._write_attempt_outcome(owned, target, None)
+        except _EXPECTED_PERSISTENCE_ERRORS:
+            try:
+                observed, usage = self._read_attempt_and_usage(owned.attempt_id)
+            except _EXPECTED_PERSISTENCE_ERRORS:
+                return
+            if observed == target and usage is None:
+                return
+
+    def _get_attempt_by_id(self, attempt_id: str) -> RequestAttemptRecord | None:
         with self.factory() as uow:
-            if uow.projects.get_by_id(usage.project_id) is None:
-                raise ConfigurationError("Usage project is unavailable")
-            if uow.keys.get_by_id(usage.sub_api_key_id) is None:
-                raise ConfigurationError("Usage key is unavailable")
-            uow.usage.add(usage)
+            return uow.attempts.get_by_id(attempt_id)
+
+    def _get_attempt_by_identity(
+        self,
+        sub_api_key_id: str,
+        identity: RuntimeAttemptIdentity,
+    ) -> RequestAttemptRecord | None:
+        assert identity.idempotency_key_digest is not None
+        with self.factory() as uow:
+            return uow.attempts.get_by_identity(
+                sub_api_key_id,
+                identity.operation,
+                identity.idempotency_key_digest,
+            )
+
+    @staticmethod
+    def _attempt_identity_is_expired(
+        attempt: RequestAttemptRecord,
+        now: datetime,
+    ) -> bool:
+        return (
+            attempt.state in {"succeeded", "provider_failed"}
+            and attempt.idempotency_expires_at is not None
+            and _normalized_utc(attempt.idempotency_expires_at)
+            <= _normalized_utc(now)
+        )
+
+    @staticmethod
+    def _raise_duplicate_attempt(
+        attempt: RequestAttemptRecord,
+        identity: RuntimeAttemptIdentity,
+    ) -> None:
+        fingerprint = identity.request_fingerprint_digest
+        if (
+            fingerprint is None
+            or attempt.request_fingerprint_digest is None
+            or not hmac.compare_digest(
+                attempt.request_fingerprint_digest, fingerprint
+            )
+        ):
+            raise RuntimeAttemptContractError(
+                409,
+                _attempt_response_detail(
+                    code="idempotency_key_reused",
+                    message=(
+                        "Idempotency-Key was already used for a different request"
+                    ),
+                    retryable=False,
+                ),
+                attempt_id=attempt.id,
+            )
+        if attempt.state == "dispatch_claimed":
+            raise RuntimeAttemptContractError(
+                409,
+                _attempt_response_detail(
+                    code="request_in_progress",
+                    message=(
+                        "Request is already in progress or fenced pending resolution"
+                    ),
+                    retryable=True,
+                ),
+                attempt_id=attempt.id,
+            )
+        if attempt.state == "succeeded":
+            raise RuntimeAttemptContractError(
+                409,
+                _attempt_response_detail(
+                    code="completed_result_not_replayable",
+                    message=(
+                        "Request completed, but response content was not retained"
+                    ),
+                    retryable=False,
+                ),
+                attempt_id=attempt.id,
+            )
+        if attempt.state == "provider_failed":
+            if (
+                attempt.error_code is None
+                or attempt.error_public_message is None
+                or attempt.error_http_status is None
+                or attempt.error_retryable is None
+            ):
+                raise RuntimeError("Provider-failed attempt metadata is incomplete")
+            raise RuntimeAttemptContractError(
+                attempt.error_http_status,
+                _attempt_response_detail(
+                    code=attempt.error_code,
+                    message=attempt.error_public_message,
+                    retryable=attempt.error_retryable,
+                ),
+                attempt_id=attempt.id,
+            )
+        if attempt.state == "provider_outcome_uncertain":
+            raise RuntimeAttemptContractError(
+                503,
+                _attempt_response_detail(
+                    code="request_outcome_uncertain",
+                    message=(
+                        "Request outcome is uncertain and will not be "
+                        "re-executed automatically"
+                    ),
+                    retryable=False,
+                ),
+                attempt_id=attempt.id,
+            )
+        if attempt.state == "finalization_failed":
+            raise RuntimeAttemptContractError(
+                503,
+                _FINALIZATION_UNAVAILABLE_DETAIL,
+                attempt_id=attempt.id,
+            )
+        raise RuntimeError("Request attempt has an unsupported state")
+
+    @staticmethod
+    def _normalize_success_outcome(
+        outcome: RuntimeSuccessOutcome,
+    ) -> RuntimeSuccessOutcome:
+        token_values = (
+            outcome.input_tokens,
+            outcome.output_tokens,
+            outcome.total_tokens,
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in token_values
+        ):
+            raise ValueError("Runtime success token counts are invalid")
+        if (
+            not isinstance(outcome.estimated_cost_eur, Decimal)
+            or not outcome.estimated_cost_eur.is_finite()
+            or outcome.estimated_cost_eur < 0
+            or outcome.estimated_cost_eur > _MAX_STORABLE_COST_EUR
+            or outcome.currency != "EUR"
+            or isinstance(outcome.latency_ms, bool)
+            or not isinstance(outcome.latency_ms, int)
+            or outcome.latency_ms < 0
+        ):
+            raise ValueError("Runtime success accounting metadata is invalid")
+        try:
+            normalized_cost = outcome.estimated_cost_eur.quantize(
+                _COST_QUANTUM,
+                rounding=ROUND_HALF_EVEN,
+            )
+        except InvalidOperation:
+            raise ValueError(
+                "Runtime success accounting metadata is invalid"
+            ) from None
+        return replace(outcome, estimated_cost_eur=normalized_cost)
+
+    @staticmethod
+    def _resolved_identity_expiry(
+        attempt: RequestAttemptRecord,
+        now: datetime,
+    ) -> datetime | None:
+        if attempt.idempotency_key_digest is None:
+            return None
+        return now + timedelta(days=settings.idempotency_retention_days)
+
+    def _write_attempt_outcome(
+        self,
+        owned: OwnedRuntimeAttempt,
+        replacement: RequestAttemptRecord,
+        usage: UsageRecord | None,
+    ) -> None:
+        dispatch_digest = _dispatch_token_digest(owned.dispatch_token)
+        with self.factory() as uow:
+            transitioned = uow.attempts.transition(
+                owned.attempt_id,
+                expected_state="dispatch_claimed",
+                dispatch_token_digest=dispatch_digest,
+                replacement=replacement,
+            )
+            if not transitioned:
+                raise PersistenceConflictError("Attempt transition conflict")
+            if usage is not None:
+                uow.usage.add(usage)
             uow.commit()
+
+    def _read_attempt_and_usage(
+        self,
+        attempt_id: str,
+    ) -> tuple[RequestAttemptRecord | None, UsageRecord | None]:
+        with self.factory() as uow:
+            return (
+                uow.attempts.get_by_id(attempt_id),
+                uow.usage.get_by_request_attempt_id(attempt_id),
+            )
+
+    @staticmethod
+    def _outcome_is_confirmed(
+        observed_attempt: RequestAttemptRecord | None,
+        observed_usage: UsageRecord | None,
+        intended_attempt: RequestAttemptRecord,
+        intended_usage: UsageRecord | None,
+    ) -> bool:
+        return (
+            observed_attempt == intended_attempt
+            and observed_usage == intended_usage
+        )
+
+    def _finalize_runtime_attempt(
+        self,
+        owned: OwnedRuntimeAttempt,
+        *,
+        target: RequestAttemptRecord,
+        usage: UsageRecord | None,
+        compensation: RequestAttemptRecord,
+    ) -> None:
+        try:
+            self._write_attempt_outcome(owned, target, usage)
+            return
+        except _EXPECTED_PERSISTENCE_ERRORS:
+            pass
+
+        try:
+            observed_attempt, observed_usage = self._read_attempt_and_usage(
+                owned.attempt_id
+            )
+        except _EXPECTED_PERSISTENCE_ERRORS as exc:
+            raise RuntimeAttemptContractError(
+                503,
+                _FINALIZATION_UNAVAILABLE_DETAIL,
+                attempt_id=owned.attempt_id,
+            ) from exc
+        if self._outcome_is_confirmed(
+            observed_attempt,
+            observed_usage,
+            target,
+            usage,
+        ):
+            return
+
+        dispatch_digest = _dispatch_token_digest(owned.dispatch_token)
+        if (
+            observed_attempt is None
+            or observed_attempt.state != "dispatch_claimed"
+            or not hmac.compare_digest(
+                observed_attempt.dispatch_token_digest, dispatch_digest
+            )
+            or observed_usage is not None
+        ):
+            raise RuntimeAttemptContractError(
+                503,
+                _FINALIZATION_UNAVAILABLE_DETAIL,
+                attempt_id=owned.attempt_id,
+            )
+
+        try:
+            self._write_attempt_outcome(owned, compensation, None)
+        except _EXPECTED_PERSISTENCE_ERRORS:
+            try:
+                observed_attempt, observed_usage = self._read_attempt_and_usage(
+                    owned.attempt_id
+                )
+            except _EXPECTED_PERSISTENCE_ERRORS as exc:
+                raise RuntimeAttemptContractError(
+                    503,
+                    _FINALIZATION_UNAVAILABLE_DETAIL,
+                    attempt_id=owned.attempt_id,
+                ) from exc
+            if self._outcome_is_confirmed(
+                observed_attempt,
+                observed_usage,
+                target,
+                usage,
+            ):
+                return
+            if not self._outcome_is_confirmed(
+                observed_attempt,
+                observed_usage,
+                compensation,
+                None,
+            ):
+                raise RuntimeAttemptContractError(
+                    503,
+                    _FINALIZATION_UNAVAILABLE_DETAIL,
+                    attempt_id=owned.attempt_id,
+                )
+
+        raise RuntimeAttemptContractError(
+            503,
+            _FINALIZATION_UNAVAILABLE_DETAIL,
+            attempt_id=owned.attempt_id,
+        )
+
+    def record_usage(self, usage: UsageRecord) -> None:
+        try:
+            with self.factory() as uow:
+                if uow.projects.get_by_id(usage.project_id) is None:
+                    raise ConfigurationError("Usage project is unavailable")
+                if uow.keys.get_by_id(usage.sub_api_key_id) is None:
+                    raise ConfigurationError("Usage key is unavailable")
+                uow.usage.add(usage)
+                uow.commit()
+        except (PersistenceConflictError, PersistenceWriteError) as exc:
+            raise ConfigurationError("Usage finalization is unavailable") from exc

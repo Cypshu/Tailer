@@ -1,8 +1,13 @@
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import (
+    IntegrityError,
+    InterfaceError,
+    OperationalError,
+    TimeoutError as SqlAlchemyTimeoutError,
+)
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain import (
@@ -10,6 +15,8 @@ from app.domain import (
     ModelConfigRecord,
     ProjectRecord,
     ProviderCredentialRecord,
+    RequestAttemptRecord,
+    RequestAttemptState,
     UsageRecord,
     UserRecord,
 )
@@ -17,19 +24,39 @@ from app.models_db import (
     ModelConfig,
     Project,
     ProviderCredential,
+    RequestAttempt,
     SubApiKey,
     UsageEvent,
     User,
 )
-from app.repositories.base import PersistenceConflictError
+from app.repositories.base import PersistenceConflictError, PersistenceWriteError
+
+
+_EXPECTED_WRITE_ERRORS = (
+    OperationalError,
+    InterfaceError,
+    SqlAlchemyTimeoutError,
+)
+
+
+def _rollback_after_failure(session: Session) -> None:
+    try:
+        session.rollback()
+    except _EXPECTED_WRITE_ERRORS:
+        # Preserve the original safe failure when the unavailable connection
+        # also refuses the best-effort rollback.
+        pass
 
 
 def _flush(session: Session) -> None:
     try:
         session.flush()
     except IntegrityError as exc:
-        session.rollback()
+        _rollback_after_failure(session)
         raise PersistenceConflictError("Persistence constraint conflict") from exc
+    except _EXPECTED_WRITE_ERRORS as exc:
+        _rollback_after_failure(session)
+        raise PersistenceWriteError("Persistence write failed") from exc
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -132,6 +159,46 @@ def _usage_record(row: UsageEvent) -> UsageRecord:
         status=row.status,
         created_at=_as_utc(row.created_at),
         error_code=row.error_code,
+        request_attempt_id=row.request_attempt_id,
+    )
+
+
+def _request_attempt_record(row: RequestAttempt) -> RequestAttemptRecord:
+    return RequestAttemptRecord(
+        id=row.id,
+        project_id=row.project_id,
+        sub_api_key_id=row.sub_api_key_id,
+        user_id=row.user_id,
+        operation=row.operation,
+        idempotency_key_digest=row.idempotency_key_digest,
+        request_fingerprint_digest=row.request_fingerprint_digest,
+        dispatch_token_digest=row.dispatch_token_digest,
+        state=row.state,
+        provider=row.provider,
+        public_model=row.public_model,
+        provider_model=row.provider_model,
+        provider_result_id=row.provider_result_id,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        total_tokens=row.total_tokens,
+        estimated_cost_eur=(
+            Decimal(row.estimated_cost_eur)
+            if row.estimated_cost_eur is not None
+            else None
+        ),
+        currency=row.currency,
+        latency_ms=row.latency_ms,
+        error_code=row.error_code,
+        error_http_status=row.error_http_status,
+        error_public_message=row.error_public_message,
+        error_retryable=row.error_retryable,
+        idempotency_expires_at=(
+            _as_utc(row.idempotency_expires_at)
+            if row.idempotency_expires_at is not None
+            else None
+        ),
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc(row.updated_at),
     )
 
 
@@ -376,12 +443,180 @@ class SqlAlchemyKeyRepository:
         return _key_record(row)
 
 
+class SqlAlchemyRequestAttemptRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def _read(self, operation):
+        try:
+            return operation()
+        except _EXPECTED_WRITE_ERRORS as exc:
+            _rollback_after_failure(self.session)
+            raise PersistenceWriteError("Persistence read failed") from exc
+
+    def get_by_id(self, attempt_id: str) -> RequestAttemptRecord | None:
+        row = self._read(lambda: self.session.get(RequestAttempt, attempt_id))
+        return _request_attempt_record(row) if row is not None else None
+
+    def get_by_identity(
+        self,
+        sub_api_key_id: str,
+        operation: str,
+        idempotency_key_digest: str,
+    ) -> RequestAttemptRecord | None:
+        row = self._read(
+            lambda: self.session.scalar(
+                select(RequestAttempt).where(
+                    RequestAttempt.sub_api_key_id == sub_api_key_id,
+                    RequestAttempt.operation == operation,
+                    RequestAttempt.idempotency_key_digest
+                    == idempotency_key_digest,
+                )
+            )
+        )
+        return _request_attempt_record(row) if row is not None else None
+
+    def add(self, attempt: RequestAttemptRecord) -> None:
+        self.session.add(
+            RequestAttempt(
+                id=attempt.id,
+                project_id=attempt.project_id,
+                sub_api_key_id=attempt.sub_api_key_id,
+                user_id=attempt.user_id,
+                operation=attempt.operation,
+                idempotency_key_digest=attempt.idempotency_key_digest,
+                request_fingerprint_digest=attempt.request_fingerprint_digest,
+                dispatch_token_digest=attempt.dispatch_token_digest,
+                state=attempt.state,
+                provider=attempt.provider,
+                public_model=attempt.public_model,
+                provider_model=attempt.provider_model,
+                provider_result_id=attempt.provider_result_id,
+                input_tokens=attempt.input_tokens,
+                output_tokens=attempt.output_tokens,
+                total_tokens=attempt.total_tokens,
+                estimated_cost_eur=attempt.estimated_cost_eur,
+                currency=attempt.currency,
+                latency_ms=attempt.latency_ms,
+                error_code=attempt.error_code,
+                error_http_status=attempt.error_http_status,
+                error_public_message=attempt.error_public_message,
+                error_retryable=attempt.error_retryable,
+                idempotency_expires_at=(
+                    _db_datetime(attempt.idempotency_expires_at)
+                    if attempt.idempotency_expires_at is not None
+                    else None
+                ),
+                created_at=_db_datetime(attempt.created_at),
+                updated_at=_db_datetime(attempt.updated_at),
+            )
+        )
+        _flush(self.session)
+
+    def transition(
+        self,
+        attempt_id: str,
+        *,
+        expected_state: RequestAttemptState,
+        dispatch_token_digest: str,
+        replacement: RequestAttemptRecord,
+    ) -> bool:
+        if replacement.id != attempt_id:
+            raise ValueError("Attempt transition changed immutable identity")
+        statement = (
+            update(RequestAttempt)
+            .where(
+                RequestAttempt.id == attempt_id,
+                RequestAttempt.state == expected_state,
+                RequestAttempt.dispatch_token_digest == dispatch_token_digest,
+            )
+            .values(
+                state=replacement.state,
+                provider_result_id=replacement.provider_result_id,
+                input_tokens=replacement.input_tokens,
+                output_tokens=replacement.output_tokens,
+                total_tokens=replacement.total_tokens,
+                estimated_cost_eur=replacement.estimated_cost_eur,
+                currency=replacement.currency,
+                latency_ms=replacement.latency_ms,
+                error_code=replacement.error_code,
+                error_http_status=replacement.error_http_status,
+                error_public_message=replacement.error_public_message,
+                error_retryable=replacement.error_retryable,
+                idempotency_expires_at=(
+                    _db_datetime(replacement.idempotency_expires_at)
+                    if replacement.idempotency_expires_at is not None
+                    else None
+                ),
+                updated_at=_db_datetime(replacement.updated_at),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        try:
+            result = self.session.execute(statement)
+        except IntegrityError as exc:
+            _rollback_after_failure(self.session)
+            raise PersistenceConflictError("Persistence constraint conflict") from exc
+        except _EXPECTED_WRITE_ERRORS as exc:
+            _rollback_after_failure(self.session)
+            raise PersistenceWriteError("Persistence write failed") from exc
+        return result.rowcount == 1
+
+    def retire_expired_identity(
+        self,
+        attempt_id: str,
+        *,
+        expected_idempotency_key_digest: str,
+        now: datetime,
+    ) -> bool:
+        statement = (
+            update(RequestAttempt)
+            .where(
+                RequestAttempt.id == attempt_id,
+                RequestAttempt.state.in_(("succeeded", "provider_failed")),
+                RequestAttempt.idempotency_key_digest
+                == expected_idempotency_key_digest,
+                RequestAttempt.idempotency_expires_at.is_not(None),
+                RequestAttempt.idempotency_expires_at <= _db_datetime(now),
+            )
+            .values(
+                idempotency_key_digest=None,
+                request_fingerprint_digest=None,
+                updated_at=_db_datetime(now),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        try:
+            result = self.session.execute(statement)
+        except IntegrityError as exc:
+            _rollback_after_failure(self.session)
+            raise PersistenceConflictError("Persistence constraint conflict") from exc
+        except _EXPECTED_WRITE_ERRORS as exc:
+            _rollback_after_failure(self.session)
+            raise PersistenceWriteError("Persistence write failed") from exc
+        return result.rowcount == 1
+
+
 class SqlAlchemyUsageRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
     def get_by_id(self, usage_id: str) -> UsageRecord | None:
         row = self.session.get(UsageEvent, usage_id)
+        return _usage_record(row) if row is not None else None
+
+    def get_by_request_attempt_id(
+        self, request_attempt_id: str
+    ) -> UsageRecord | None:
+        try:
+            row = self.session.scalar(
+                select(UsageEvent).where(
+                    UsageEvent.request_attempt_id == request_attempt_id
+                )
+            )
+        except _EXPECTED_WRITE_ERRORS as exc:
+            _rollback_after_failure(self.session)
+            raise PersistenceWriteError("Persistence read failed") from exc
         return _usage_record(row) if row is not None else None
 
     def list(
@@ -404,12 +639,31 @@ class SqlAlchemyUsageRepository:
         return [_usage_record(row) for row in rows]
 
     def add(self, usage: UsageRecord) -> None:
+        if usage.request_attempt_id is not None:
+            try:
+                attempt_attribution = self.session.execute(
+                    select(
+                        RequestAttempt.project_id,
+                        RequestAttempt.sub_api_key_id,
+                        RequestAttempt.user_id,
+                    ).where(RequestAttempt.id == usage.request_attempt_id)
+                ).one_or_none()
+            except _EXPECTED_WRITE_ERRORS as exc:
+                _rollback_after_failure(self.session)
+                raise PersistenceWriteError("Persistence read failed") from exc
+            if attempt_attribution is None or tuple(attempt_attribution) != (
+                usage.project_id,
+                usage.sub_api_key_id,
+                usage.user_id,
+            ):
+                raise PersistenceConflictError("Persistence constraint conflict")
         self.session.add(
             UsageEvent(
                 id=usage.id,
                 project_id=usage.project_id,
                 sub_api_key_id=usage.sub_api_key_id,
                 user_id=usage.user_id,
+                request_attempt_id=usage.request_attempt_id,
                 provider=usage.provider,
                 model=usage.model,
                 provider_model=usage.provider_model,
@@ -440,13 +694,14 @@ class SqlAlchemyUnitOfWork:
         self.model_configs = SqlAlchemyModelConfigRepository(self.session)
         self.keys = SqlAlchemyKeyRepository(self.session)
         self.usage = SqlAlchemyUsageRepository(self.session)
+        self.attempts = SqlAlchemyRequestAttemptRepository(self.session)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         if self.session is None:
             return
         if exc_type is not None:
-            self.session.rollback()
+            _rollback_after_failure(self.session)
         self.session.close()
 
     def commit(self) -> None:
@@ -454,8 +709,11 @@ class SqlAlchemyUnitOfWork:
         try:
             self.session.commit()
         except IntegrityError as exc:
-            self.session.rollback()
+            _rollback_after_failure(self.session)
             raise PersistenceConflictError("Persistence constraint conflict") from exc
+        except _EXPECTED_WRITE_ERRORS as exc:
+            _rollback_after_failure(self.session)
+            raise PersistenceWriteError("Persistence write failed") from exc
 
     def rollback(self) -> None:
         assert self.session is not None

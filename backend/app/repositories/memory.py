@@ -10,6 +10,8 @@ from app.domain import (
     ModelConfigRecord,
     ProjectRecord,
     ProviderCredentialRecord,
+    RequestAttemptRecord,
+    RequestAttemptState,
     UsageRecord,
     UserRecord,
 )
@@ -24,6 +26,7 @@ class MemoryStore:
     model_configs: list[ModelConfigRecord] = field(default_factory=list)
     keys: list[KeyRecord] = field(default_factory=list)
     usage: list[UsageRecord] = field(default_factory=list)
+    attempts: list[RequestAttemptRecord] = field(default_factory=list)
     _uow_lock: LockType = field(
         default_factory=Lock,
         init=False,
@@ -41,6 +44,7 @@ def _copy_store(store: MemoryStore) -> MemoryStore:
         model_configs=deepcopy(store.model_configs),
         keys=deepcopy(store.keys),
         usage=deepcopy(store.usage),
+        attempts=deepcopy(store.attempts),
     )
 
 
@@ -281,12 +285,203 @@ class MemoryKeyRepository:
         return key
 
 
+_ATTEMPT_STATES = {
+    "dispatch_claimed",
+    "succeeded",
+    "provider_failed",
+    "provider_outcome_uncertain",
+    "finalization_failed",
+}
+_RESOLVED_ATTEMPT_STATES = {"succeeded", "provider_failed"}
+_ATTEMPT_MUTABLE_FIELDS = (
+    "state",
+    "provider_result_id",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "estimated_cost_eur",
+    "currency",
+    "latency_ms",
+    "error_code",
+    "error_http_status",
+    "error_public_message",
+    "error_retryable",
+    "idempotency_expires_at",
+    "updated_at",
+)
+
+
+def _is_valid_attempt(attempt: RequestAttemptRecord, store: MemoryStore) -> bool:
+    key_digest = attempt.idempotency_key_digest
+    fingerprint_digest = attempt.request_fingerprint_digest
+    project_exists = any(item.id == attempt.project_id for item in store.projects)
+    key_exists = any(item.id == attempt.sub_api_key_id for item in store.keys)
+    user_exists = any(item.id == attempt.user_id for item in store.users)
+    return (
+        project_exists
+        and key_exists
+        and user_exists
+        and attempt.state in _ATTEMPT_STATES
+        and ((key_digest is None) == (fingerprint_digest is None))
+        and (key_digest is None or len(key_digest) == 64)
+        and (fingerprint_digest is None or len(fingerprint_digest) == 64)
+        and len(attempt.dispatch_token_digest) == 64
+        and (attempt.input_tokens is None or attempt.input_tokens >= 0)
+        and (attempt.output_tokens is None or attempt.output_tokens >= 0)
+        and (attempt.total_tokens is None or attempt.total_tokens >= 0)
+        and (
+            attempt.estimated_cost_eur is None
+            or attempt.estimated_cost_eur >= 0
+        )
+        and (
+            attempt.currency is None
+            or (
+                len(attempt.currency) == 3
+                and attempt.currency == attempt.currency.upper()
+            )
+        )
+        and (
+            (attempt.estimated_cost_eur is None and attempt.currency is None)
+            or (
+                attempt.estimated_cost_eur is not None
+                and attempt.currency == "EUR"
+            )
+        )
+        and (attempt.latency_ms is None or attempt.latency_ms >= 0)
+        and (
+            attempt.error_http_status is None
+            or 400 <= attempt.error_http_status <= 599
+        )
+    )
+
+
+class MemoryRequestAttemptRepository:
+    def __init__(self, store: MemoryStore) -> None:
+        self.store = store
+
+    def get_by_id(self, attempt_id: str) -> RequestAttemptRecord | None:
+        return next(
+            (attempt for attempt in self.store.attempts if attempt.id == attempt_id),
+            None,
+        )
+
+    def get_by_identity(
+        self,
+        sub_api_key_id: str,
+        operation: str,
+        idempotency_key_digest: str,
+    ) -> RequestAttemptRecord | None:
+        return next(
+            (
+                attempt
+                for attempt in self.store.attempts
+                if attempt.sub_api_key_id == sub_api_key_id
+                and attempt.operation == operation
+                and attempt.idempotency_key_digest == idempotency_key_digest
+            ),
+            None,
+        )
+
+    def add(self, attempt: RequestAttemptRecord) -> None:
+        duplicate_id = any(item.id == attempt.id for item in self.store.attempts)
+        duplicate_identity = (
+            attempt.idempotency_key_digest is not None
+            and any(
+                item.sub_api_key_id == attempt.sub_api_key_id
+                and item.operation == attempt.operation
+                and item.idempotency_key_digest == attempt.idempotency_key_digest
+                for item in self.store.attempts
+            )
+        )
+        if duplicate_id or duplicate_identity or not _is_valid_attempt(
+            attempt, self.store
+        ):
+            raise PersistenceConflictError("Persistence constraint conflict")
+        self.store.attempts.append(attempt)
+
+    def transition(
+        self,
+        attempt_id: str,
+        *,
+        expected_state: RequestAttemptState,
+        dispatch_token_digest: str,
+        replacement: RequestAttemptRecord,
+    ) -> bool:
+        current = self.get_by_id(attempt_id)
+        if (
+            current is None
+            or current.state != expected_state
+            or not compare_digest(
+                current.dispatch_token_digest, dispatch_token_digest
+            )
+        ):
+            return False
+        if replacement.id != attempt_id:
+            raise ValueError("Attempt transition changed immutable identity")
+        candidate = deepcopy(current)
+        for field_name in _ATTEMPT_MUTABLE_FIELDS:
+            setattr(candidate, field_name, deepcopy(getattr(replacement, field_name)))
+        if not _is_valid_attempt(candidate, self.store):
+            raise PersistenceConflictError("Persistence constraint conflict")
+        index = self.store.attempts.index(current)
+        self.store.attempts[index] = candidate
+        return True
+
+    def retire_expired_identity(
+        self,
+        attempt_id: str,
+        *,
+        expected_idempotency_key_digest: str,
+        now: datetime,
+    ) -> bool:
+        attempt = self.get_by_id(attempt_id)
+        if (
+            attempt is None
+            or attempt.state not in _RESOLVED_ATTEMPT_STATES
+            or attempt.idempotency_key_digest is None
+            or not compare_digest(
+                attempt.idempotency_key_digest, expected_idempotency_key_digest
+            )
+            or attempt.idempotency_expires_at is None
+        ):
+            return False
+        normalized_now = (
+            now.replace(tzinfo=timezone.utc)
+            if now.tzinfo is None or now.utcoffset() is None
+            else now.astimezone(timezone.utc)
+        )
+        expires_at = attempt.idempotency_expires_at
+        normalized_expiry = (
+            expires_at.replace(tzinfo=timezone.utc)
+            if expires_at.tzinfo is None or expires_at.utcoffset() is None
+            else expires_at.astimezone(timezone.utc)
+        )
+        if normalized_expiry > normalized_now:
+            return False
+        attempt.idempotency_key_digest = None
+        attempt.request_fingerprint_digest = None
+        attempt.updated_at = normalized_now
+        return True
+
+
 class MemoryUsageRepository:
     def __init__(self, store: MemoryStore) -> None:
         self.store = store
 
     def get_by_id(self, usage_id: str) -> UsageRecord | None:
         return next((event for event in self.store.usage if event.id == usage_id), None)
+
+    def get_by_request_attempt_id(
+        self, request_attempt_id: str
+    ) -> UsageRecord | None:
+        return next(
+            (
+                event
+                for event in self.store.usage
+                if event.request_attempt_id == request_attempt_id
+            ),
+            None,
+        )
 
     def list(
         self,
@@ -305,6 +500,29 @@ class MemoryUsageRepository:
         return ordered[offset:] if limit is None else ordered[offset : offset + limit]
 
     def add(self, usage: UsageRecord) -> None:
+        duplicate = any(event.id == usage.id for event in self.store.usage)
+        if usage.request_attempt_id is not None:
+            attempt = next(
+                (
+                    item
+                    for item in self.store.attempts
+                    if item.id == usage.request_attempt_id
+                ),
+                None,
+            )
+            duplicate_attempt_link = any(
+                event.request_attempt_id == usage.request_attempt_id
+                for event in self.store.usage
+            )
+            matching_attribution = attempt is not None and (
+                attempt.project_id,
+                attempt.sub_api_key_id,
+                attempt.user_id,
+            ) == (usage.project_id, usage.sub_api_key_id, usage.user_id)
+            if duplicate_attempt_link or not matching_attribution:
+                raise PersistenceConflictError("Persistence constraint conflict")
+        if duplicate:
+            raise PersistenceConflictError("Persistence constraint conflict")
         self.store.usage.append(usage)
 
 
@@ -317,6 +535,7 @@ class MemoryUnitOfWork:
         self.model_configs: MemoryModelConfigRepository
         self.keys: MemoryKeyRepository
         self.usage: MemoryUsageRepository
+        self.attempts: MemoryRequestAttemptRepository
         self._working_store: MemoryStore | None = None
         self._active = False
 
@@ -327,6 +546,7 @@ class MemoryUnitOfWork:
         self.model_configs = MemoryModelConfigRepository(store)
         self.keys = MemoryKeyRepository(store)
         self.usage = MemoryUsageRepository(store)
+        self.attempts = MemoryRequestAttemptRepository(store)
 
     def _require_working_store(self) -> MemoryStore:
         if not self._active or self._working_store is None:
@@ -368,6 +588,7 @@ class MemoryUnitOfWork:
         self.store.model_configs[:] = committed.model_configs
         self.store.keys[:] = committed.keys
         self.store.usage[:] = committed.usage
+        self.store.attempts[:] = committed.attempts
 
     def rollback(self) -> None:
         self._require_working_store()

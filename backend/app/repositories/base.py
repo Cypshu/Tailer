@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from datetime import datetime
 from typing import Protocol, Self
 
 from app.domain import (
@@ -6,6 +7,8 @@ from app.domain import (
     ModelConfigRecord,
     ProjectRecord,
     ProviderCredentialRecord,
+    RequestAttemptRecord,
+    RequestAttemptState,
     UsageRecord,
     UserRecord,
 )
@@ -13,6 +16,10 @@ from app.domain import (
 
 class PersistenceConflictError(RuntimeError):
     """A durable uniqueness or integrity constraint rejected a write."""
+
+
+class PersistenceWriteError(RuntimeError):
+    """An expected persistence availability failure prevented a write."""
 
 
 class UserRepository(Protocol):
@@ -70,6 +77,9 @@ class KeyRepository(Protocol):
 
 class UsageRepository(Protocol):
     def get_by_id(self, usage_id: str) -> UsageRecord | None: ...
+    def get_by_request_attempt_id(
+        self, request_attempt_id: str
+    ) -> UsageRecord | None: ...
     def list(
         self,
         *,
@@ -81,6 +91,32 @@ class UsageRepository(Protocol):
     def add(self, usage: UsageRecord) -> None: ...
 
 
+class RequestAttemptRepository(Protocol):
+    def get_by_id(self, attempt_id: str) -> RequestAttemptRecord | None: ...
+    def get_by_identity(
+        self,
+        sub_api_key_id: str,
+        operation: str,
+        idempotency_key_digest: str,
+    ) -> RequestAttemptRecord | None: ...
+    def add(self, attempt: RequestAttemptRecord) -> None: ...
+    def transition(
+        self,
+        attempt_id: str,
+        *,
+        expected_state: RequestAttemptState,
+        dispatch_token_digest: str,
+        replacement: RequestAttemptRecord,
+    ) -> bool: ...
+    def retire_expired_identity(
+        self,
+        attempt_id: str,
+        *,
+        expected_idempotency_key_digest: str,
+        now: datetime,
+    ) -> bool: ...
+
+
 class AbstractUnitOfWork(Protocol):
     users: UserRepository
     projects: ProjectRepository
@@ -88,6 +124,7 @@ class AbstractUnitOfWork(Protocol):
     model_configs: ModelConfigRepository
     keys: KeyRepository
     usage: UsageRepository
+    attempts: RequestAttemptRepository
 
     def __enter__(self) -> Self: ...
     def __exit__(self, exc_type, exc_value, traceback) -> None: ...

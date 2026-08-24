@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import math
 import re
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -42,6 +42,12 @@ class ChatCompletionResult:
     model: str
     choices: list[ChatCompletionChoice]
     usage: ChatCompletionUsage
+    durable_provider_result_id: str | None = None
+
+
+ProviderExecutionCertainty = Literal["not_executed", "unknown"]
+_PROVIDER_ERROR_CODE_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_PROVIDER_EXECUTION_CERTAINTIES = frozenset({"not_executed", "unknown"})
 
 
 class ProviderError(Exception):
@@ -54,12 +60,43 @@ class ProviderError(Exception):
         public_message: str,
         status_code: int,
         retryable: bool,
+        execution_certainty: ProviderExecutionCertainty = "unknown",
     ) -> None:
+        if (
+            not isinstance(code, str)
+            or _PROVIDER_ERROR_CODE_PATTERN.fullmatch(code) is None
+        ):
+            raise ValueError("Provider error code is invalid")
+        if (
+            not isinstance(public_message, str)
+            or not 1 <= len(public_message) <= 200
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in public_message
+            )
+        ):
+            raise ValueError("Provider public message is invalid")
+        if (
+            isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 400 <= status_code <= 599
+        ):
+            raise ValueError("Provider HTTP status must be between 400 and 599")
+        if not isinstance(retryable, bool):
+            raise ValueError("Provider retryability must be a boolean")
+        if (
+            not isinstance(execution_certainty, str)
+            or execution_certainty not in _PROVIDER_EXECUTION_CERTAINTIES
+        ):
+            raise ValueError(
+                "Provider execution certainty must be 'not_executed' or 'unknown'"
+            )
         super().__init__(public_message)
         self.code = code
         self.public_message = public_message
         self.status_code = status_code
         self.retryable = retryable
+        self.execution_certainty: ProviderExecutionCertainty = execution_certainty
 
 
 class Provider(Protocol):
@@ -481,7 +518,10 @@ def _parse_gemini_interaction(payload: Any) -> ChatCompletionResult:
     model = _required_string(payload, "model")
     interaction_status = _required_string(payload, "status")
     if interaction_status in {"failed", "cancelled", "budget_exceeded"}:
-        raise _provider_error("provider_request_rejected")
+        raise _provider_error(
+            "provider_request_rejected",
+            execution_certainty="unknown",
+        )
     if interaction_status not in {"completed", "incomplete"}:
         raise ValueError("interaction status is invalid")
 
@@ -550,6 +590,7 @@ def _parse_gemini_interaction(payload: Any) -> ChatCompletionResult:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
         ),
+        durable_provider_result_id=raw_completion_id,
     )
 
 
@@ -609,6 +650,7 @@ def _parse_openai_completion(payload: Any) -> ChatCompletionResult:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
         ),
+        durable_provider_result_id=completion_id,
     )
 
 
@@ -631,25 +673,67 @@ def _nonnegative_integer(payload: dict[str, Any], field: str) -> int:
     return value
 
 
-_PROVIDER_ERRORS: dict[str, tuple[str, int, bool]] = {
-    "provider_timeout": ("Provider request timed out", 504, True),
-    "provider_unavailable": ("Provider is unavailable", 503, True),
-    "provider_authentication_failed": ("Provider authentication failed", 502, False),
-    "provider_permission_denied": ("Provider permission denied", 502, False),
-    "provider_not_found": ("Provider resource was not found", 502, False),
-    "provider_rate_limited": ("Provider rate limit exceeded", 429, True),
-    "provider_request_rejected": ("Provider rejected the request", 502, False),
-    "provider_invalid_response": ("Provider returned an invalid response", 502, False),
+_PROVIDER_ERRORS: dict[
+    str,
+    tuple[str, int, bool, ProviderExecutionCertainty],
+] = {
+    "provider_timeout": ("Provider request timed out", 504, True, "unknown"),
+    "provider_unavailable": ("Provider is unavailable", 503, True, "unknown"),
+    "provider_authentication_failed": (
+        "Provider authentication failed",
+        502,
+        False,
+        "not_executed",
+    ),
+    "provider_permission_denied": (
+        "Provider permission denied",
+        502,
+        False,
+        "not_executed",
+    ),
+    "provider_not_found": (
+        "Provider resource was not found",
+        502,
+        False,
+        "not_executed",
+    ),
+    "provider_rate_limited": (
+        "Provider rate limit exceeded",
+        429,
+        True,
+        "not_executed",
+    ),
+    "provider_request_rejected": (
+        "Provider rejected the request",
+        502,
+        False,
+        "not_executed",
+    ),
+    "provider_invalid_response": (
+        "Provider returned an invalid response",
+        502,
+        False,
+        "unknown",
+    ),
 }
 
 
-def _provider_error(code: str) -> ProviderError:
-    public_message, status_code, retryable = _PROVIDER_ERRORS[code]
+def _provider_error(
+    code: str,
+    *,
+    execution_certainty: ProviderExecutionCertainty | None = None,
+) -> ProviderError:
+    public_message, status_code, retryable, default_certainty = _PROVIDER_ERRORS[code]
     return ProviderError(
         code=code,
         public_message=public_message,
         status_code=status_code,
         retryable=retryable,
+        execution_certainty=(
+            default_certainty
+            if execution_certainty is None
+            else execution_certainty
+        ),
     )
 
 

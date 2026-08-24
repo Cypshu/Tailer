@@ -112,6 +112,7 @@ def test_gemini_provider_sends_stateless_contract_and_parses_interaction() -> No
         "system_instruction": "Be concise.",
     }
     assert result.id == "gemini_interaction_test"
+    assert result.durable_provider_result_id == "gemini_interaction_test"
     assert result.model == "gemini-3.6-flash"
     assert result.choices[0].message.role == "assistant"
     assert result.choices[0].message.content == "Hello from Gemini"
@@ -167,23 +168,80 @@ def test_gemini_provider_synthesizes_id_for_unstored_interaction() -> None:
 
     assert result.id.startswith("chatcmpl_gemini_")
     assert result.id == _call_provider(handler)[1].id
+    assert result.durable_provider_result_id is None
 
 
 @pytest.mark.parametrize(
-    ("status", "code", "message", "public_status", "retryable"),
+    (
+        "status",
+        "code",
+        "message",
+        "public_status",
+        "retryable",
+        "execution_certainty",
+    ),
     [
-        (408, "provider_timeout", "Provider request timed out", 504, True),
-        (401, "provider_authentication_failed", "Provider authentication failed", 502, False),
-        (403, "provider_permission_denied", "Provider permission denied", 502, False),
-        (404, "provider_not_found", "Provider resource was not found", 502, False),
-        (429, "provider_rate_limited", "Provider rate limit exceeded", 429, True),
-        (400, "provider_request_rejected", "Provider rejected the request", 502, False),
-        (422, "provider_request_rejected", "Provider rejected the request", 502, False),
-        (499, "provider_unavailable", "Provider is unavailable", 503, True),
-        (500, "provider_unavailable", "Provider is unavailable", 503, True),
-        (503, "provider_unavailable", "Provider is unavailable", 503, True),
-        (504, "provider_timeout", "Provider request timed out", 504, True),
-        (302, "provider_invalid_response", "Provider returned an invalid response", 502, False),
+        (408, "provider_timeout", "Provider request timed out", 504, True, "unknown"),
+        (
+            401,
+            "provider_authentication_failed",
+            "Provider authentication failed",
+            502,
+            False,
+            "not_executed",
+        ),
+        (
+            403,
+            "provider_permission_denied",
+            "Provider permission denied",
+            502,
+            False,
+            "not_executed",
+        ),
+        (
+            404,
+            "provider_not_found",
+            "Provider resource was not found",
+            502,
+            False,
+            "not_executed",
+        ),
+        (
+            429,
+            "provider_rate_limited",
+            "Provider rate limit exceeded",
+            429,
+            True,
+            "not_executed",
+        ),
+        (
+            400,
+            "provider_request_rejected",
+            "Provider rejected the request",
+            502,
+            False,
+            "not_executed",
+        ),
+        (
+            422,
+            "provider_request_rejected",
+            "Provider rejected the request",
+            502,
+            False,
+            "not_executed",
+        ),
+        (499, "provider_unavailable", "Provider is unavailable", 503, True, "unknown"),
+        (500, "provider_unavailable", "Provider is unavailable", 503, True, "unknown"),
+        (503, "provider_unavailable", "Provider is unavailable", 503, True, "unknown"),
+        (504, "provider_timeout", "Provider request timed out", 504, True, "unknown"),
+        (
+            302,
+            "provider_invalid_response",
+            "Provider returned an invalid response",
+            502,
+            False,
+            "unknown",
+        ),
     ],
 )
 def test_gemini_provider_normalizes_http_errors_without_upstream_body(
@@ -192,6 +250,7 @@ def test_gemini_provider_normalizes_http_errors_without_upstream_body(
     message: str,
     public_status: int,
     retryable: bool,
+    execution_certainty: str,
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -208,6 +267,7 @@ def test_gemini_provider_normalizes_http_errors_without_upstream_body(
     assert error.public_message == message
     assert error.status_code == public_status
     assert error.retryable is retryable
+    assert error.execution_certainty == execution_certainty
     assert _UPSTREAM_SECRET not in repr(error)
     assert _API_KEY not in repr(error)
 
@@ -234,6 +294,7 @@ def test_gemini_provider_recognizes_api_key_invalid_inside_http_400() -> None:
         _call_provider(handler)
 
     assert caught.value.code == "provider_authentication_failed"
+    assert caught.value.execution_certainty == "not_executed"
     assert _UPSTREAM_SECRET not in repr(caught.value)
 
 
@@ -257,6 +318,7 @@ def test_gemini_provider_normalizes_transport_errors(
 
     assert caught.value.code == code
     assert caught.value.status_code == status_code
+    assert caught.value.execution_certainty == "unknown"
     assert _UPSTREAM_SECRET not in repr(caught.value)
 
 
@@ -299,16 +361,27 @@ def test_gemini_provider_normalizes_invalid_success_responses(
         _call_provider(handler)
 
     assert caught.value.code == "provider_invalid_response"
+    assert caught.value.execution_certainty == "unknown"
 
 
-def test_gemini_provider_normalizes_logical_failure_response() -> None:
+@pytest.mark.parametrize(
+    "interaction_status",
+    ["failed", "cancelled", "budget_exceeded"],
+)
+def test_gemini_provider_normalizes_logical_failure_response(
+    interaction_status: str,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=_interaction_payload(status="failed"))
+        return httpx.Response(
+            200,
+            json=_interaction_payload(status=interaction_status),
+        )
 
     with pytest.raises(ProviderError) as caught:
         _call_provider(handler)
 
     assert caught.value.code == "provider_request_rejected"
+    assert caught.value.execution_certainty == "unknown"
 
 
 @pytest.mark.parametrize(
@@ -329,6 +402,7 @@ def test_gemini_provider_rejects_untranslatable_messages_without_calling_upstrea
         _call_provider(handler, messages=messages)
 
     assert caught.value.code == "provider_request_rejected"
+    assert caught.value.execution_certainty == "not_executed"
 
 
 def test_gemini_provider_rejects_invalid_model_without_calling_upstream() -> None:
@@ -339,6 +413,7 @@ def test_gemini_provider_rejects_invalid_model_without_calling_upstream() -> Non
         _call_provider(handler, model="../../secret?key=leak")
 
     assert caught.value.code == "provider_request_rejected"
+    assert caught.value.execution_certainty == "not_executed"
 
 
 @pytest.mark.parametrize("rate", [Decimal("-0.1"), "NaN", "Infinity"])

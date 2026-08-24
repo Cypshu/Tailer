@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.config import Settings
 from app.credential_security import generate_credential_encryption_key
 
@@ -44,3 +46,39 @@ def test_gemini_base_url_has_secure_default_and_environment_override(
     )
     configured = Settings(_env_file=None)
     assert configured.gemini_base_url == "https://gemini.example.test/v1"
+
+
+def test_idempotency_settings_have_safe_defaults_and_redact_pepper(
+    monkeypatch,
+) -> None:
+    sentinel = "idempotency-pepper-SENTINEL-never-print"
+    monkeypatch.setenv("TAILER_IDEMPOTENCY_KEY_PEPPER", sentinel)
+    monkeypatch.setenv("TAILER_IDEMPOTENCY_RETENTION_DAYS", "45")
+
+    configured = Settings(_env_file=None)
+
+    assert configured.idempotency_key_pepper.get_secret_value() == sentinel
+    assert configured.idempotency_retention_days == 45
+    assert sentinel not in repr(configured)
+    assert sentinel not in configured.model_dump_json()
+    monkeypatch.delenv("TAILER_IDEMPOTENCY_KEY_PEPPER")
+    monkeypatch.delenv("TAILER_IDEMPOTENCY_RETENTION_DAYS")
+    assert Settings(_env_file=None).idempotency_retention_days == 30
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("TAILER_IDEMPOTENCY_KEY_PEPPER", "   "),
+        ("TAILER_IDEMPOTENCY_RETENTION_DAYS", "0"),
+    ],
+)
+def test_invalid_idempotency_settings_fail_closed(
+    monkeypatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError):
+        Settings(_env_file=None)

@@ -548,7 +548,7 @@ def test_gemini_alias_uses_encrypted_credential_and_durable_usage(
                 retryable=True,
             ),
             504,
-            "failed",
+            None,
         ),
         (
             ProviderError(
@@ -556,6 +556,7 @@ def test_gemini_alias_uses_encrypted_credential_and_durable_usage(
                 public_message="Provider rate limit exceeded",
                 status_code=429,
                 retryable=True,
+                execution_certainty="not_executed",
             ),
             429,
             "rate_limited",
@@ -563,7 +564,7 @@ def test_gemini_alias_uses_encrypted_credential_and_durable_usage(
     ],
     ids=["timeout", "rate-limited"],
 )
-def test_provider_failures_are_sanitized_and_durably_metered(
+def test_provider_failures_are_sanitized_and_accounted_by_certainty(
     client: TestClient,
     admin_headers: dict[str, str],
     active_key,
@@ -573,7 +574,7 @@ def test_provider_failures_are_sanitized_and_durably_metered(
     caplog: pytest.LogCaptureFixture,
     error: ProviderError,
     expected_status: int,
-    usage_status: str,
+    usage_status: str | None,
 ) -> None:
     _configure_encryption(monkeypatch)
     _allow_public_model(mutate_key, active_key)
@@ -623,6 +624,12 @@ def test_provider_failures_are_sanitized_and_durably_metered(
     assert _UPSTREAM_ERROR_SECRET not in response.text
 
     new_ids = _usage_ids(uow_factory) - before_ids
+    if usage_status is None:
+        assert new_ids == set()
+        assert _PROVIDER_SECRET not in caplog.text
+        assert stored_credential.ciphertext not in caplog.text
+        assert _UPSTREAM_ERROR_SECRET not in caplog.text
+        return
     assert len(new_ids) == 1
     with uow_factory() as uow:
         event = uow.usage.get_by_id(new_ids.pop())

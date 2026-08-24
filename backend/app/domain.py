@@ -4,6 +4,15 @@ from decimal import Decimal
 from typing import Literal
 
 
+RequestAttemptState = Literal[
+    "dispatch_claimed",
+    "succeeded",
+    "provider_failed",
+    "provider_outcome_uncertain",
+    "finalization_failed",
+]
+
+
 @dataclass
 class UserRecord:
     id: str
@@ -106,3 +115,34 @@ class UsageRecord:
     status: Literal["success", "failed", "blocked", "rate_limited"]
     created_at: datetime
     error_code: str | None = None
+    request_attempt_id: str | None = None
+
+
+@dataclass
+class RequestAttemptRecord:
+    id: str
+    project_id: str
+    sub_api_key_id: str
+    user_id: str
+    operation: str
+    idempotency_key_digest: str | None
+    request_fingerprint_digest: str | None
+    dispatch_token_digest: str
+    state: RequestAttemptState
+    provider: str
+    public_model: str
+    provider_model: str
+    provider_result_id: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    estimated_cost_eur: Decimal | None
+    currency: str | None
+    latency_ms: int | None
+    error_code: str | None
+    error_http_status: int | None
+    error_public_message: str | None
+    error_retryable: bool | None
+    idempotency_expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime

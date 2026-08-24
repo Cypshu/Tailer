@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
+from app.providers import ProviderError
 from app.repositories.base import UnitOfWorkFactory
 from app.services import TailerService
 
@@ -90,6 +91,106 @@ def test_valid_completion_forwards_options_and_adds_one_usage_event(
     assert event.estimated_cost_eur == Decimal(str(recording_provider.cost))
     assert event.latency_ms == 42
     assert event.status == "success"
+
+
+def test_provider_success_with_usage_finalization_failure_is_safe_and_not_retried(
+    persistence_failure_client: TestClient,
+    persistence_failure_harness,
+    active_key,
+    recording_provider,
+    uow_factory: UnitOfWorkFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    before_ids = _usage_ids(uow_factory)
+    payload = _completion_payload()
+    caplog.clear()
+
+    response = persistence_failure_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {active_key.raw_key}"},
+        json=payload,
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Usage finalization is unavailable"}
+    assert recording_provider.calls == [
+        {
+            "messages": payload["messages"],
+            "model": payload["model"],
+            "max_tokens": payload["max_tokens"],
+            "temperature": payload["temperature"],
+        }
+    ]
+    assert recording_provider.cost_calls == [
+        {
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "model": payload["model"],
+        }
+    ]
+    assert _usage_ids(uow_factory) == before_ids
+
+    exposed_text = response.text + caplog.text
+    assert persistence_failure_harness.driver_detail not in exposed_text
+    assert persistence_failure_harness.sentinel_secret not in exposed_text
+    assert active_key.raw_key not in exposed_text
+
+
+def test_provider_failure_audit_finalization_uses_same_safe_contract(
+    persistence_failure_client: TestClient,
+    persistence_failure_harness,
+    active_key,
+    recording_provider,
+    uow_factory: UnitOfWorkFactory,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_call = recording_provider.chat_completions
+    provider_public_message = "Provider request was rate limited"
+
+    async def fail_after_recording_call(**kwargs):
+        await original_call(**kwargs)
+        raise ProviderError(
+            code="provider_rate_limited",
+            public_message=provider_public_message,
+            status_code=429,
+            retryable=True,
+            execution_certainty="not_executed",
+        )
+
+    monkeypatch.setattr(
+        recording_provider,
+        "chat_completions",
+        fail_after_recording_call,
+    )
+    before_ids = _usage_ids(uow_factory)
+    payload = _completion_payload()
+    caplog.clear()
+
+    response = persistence_failure_client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {active_key.raw_key}"},
+        json=payload,
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Usage finalization is unavailable"}
+    assert recording_provider.calls == [
+        {
+            "messages": payload["messages"],
+            "model": payload["model"],
+            "max_tokens": payload["max_tokens"],
+            "temperature": payload["temperature"],
+        }
+    ]
+    assert recording_provider.cost_calls == []
+    assert _usage_ids(uow_factory) == before_ids
+
+    exposed_text = response.text + caplog.text
+    assert persistence_failure_harness.driver_detail not in exposed_text
+    assert persistence_failure_harness.sentinel_secret not in exposed_text
+    assert provider_public_message not in exposed_text
+    assert active_key.raw_key not in exposed_text
 
 
 def test_request_at_max_tokens_policy_boundary_is_allowed_without_clamping(
@@ -235,6 +336,8 @@ def test_invalid_runtime_payload_is_rejected_before_provider_and_usage(
         ("prompt_tokens", -1),
         ("completion_tokens", -1),
         ("total_tokens", -1),
+        ("prompt_tokens", True),
+        ("completion_tokens", 1.5),
     ],
 )
 def test_invalid_provider_usage_does_not_add_success_event(
@@ -243,7 +346,7 @@ def test_invalid_provider_usage_does_not_add_success_event(
     recording_provider,
     uow_factory: UnitOfWorkFactory,
     usage_field: str,
-    invalid_value: int,
+    invalid_value: object,
 ) -> None:
     setattr(recording_provider.result.usage, usage_field, invalid_value)
     before_ids = _usage_ids(uow_factory)
@@ -257,15 +360,30 @@ def test_invalid_provider_usage_does_not_add_success_event(
     assert response.status_code == 502
     assert response.json() == {"detail": "Provider returned invalid usage data"}
     assert _usage_ids(uow_factory) == before_ids
+    attempt_id = response.headers["Tailer-Attempt-Id"]
+    with uow_factory() as uow:
+        attempt = uow.attempts.get_by_id(attempt_id)
+        linked_usage = uow.usage.get_by_request_attempt_id(attempt_id)
+    assert attempt is not None and attempt.state == "finalization_failed"
+    assert attempt.error_code == "provider_invalid_usage"
+    assert attempt.error_http_status == 502
+    assert attempt.error_public_message == "Provider returned invalid usage data"
+    assert attempt.error_retryable is False
+    assert linked_usage is None
 
 
+@pytest.mark.parametrize(
+    "invalid_cost",
+    [-0.01, float("nan"), float("inf"), 10_000_000_000.0],
+)
 def test_invalid_provider_cost_does_not_add_success_event(
     client: TestClient,
     active_key,
     recording_provider,
     uow_factory: UnitOfWorkFactory,
+    invalid_cost: float,
 ) -> None:
-    recording_provider.cost = -0.01
+    recording_provider.cost = invalid_cost
     before_ids = _usage_ids(uow_factory)
 
     response = client.post(
@@ -277,3 +395,13 @@ def test_invalid_provider_cost_does_not_add_success_event(
     assert response.status_code == 502
     assert response.json() == {"detail": "Provider returned invalid usage data"}
     assert _usage_ids(uow_factory) == before_ids
+    attempt_id = response.headers["Tailer-Attempt-Id"]
+    with uow_factory() as uow:
+        attempt = uow.attempts.get_by_id(attempt_id)
+        linked_usage = uow.usage.get_by_request_attempt_id(attempt_id)
+    assert attempt is not None and attempt.state == "finalization_failed"
+    assert attempt.error_code == "provider_invalid_usage"
+    assert attempt.error_http_status == 502
+    assert attempt.error_public_message == "Provider returned invalid usage data"
+    assert attempt.error_retryable is False
+    assert linked_usage is None

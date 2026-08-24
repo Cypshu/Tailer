@@ -1,10 +1,10 @@
 # TAILER Testing Guide
 
-Last verified: 2026-08-02
+Last verified: 2026-08-24
 
 ## Current testing status
 
-TAILER has a 229-case backend regression suite under `backend/tests/`.
+TAILER has a 386-case backend regression suite under `backend/tests/`.
 
 - `backend/requirements-dev.txt` includes compatible `pytest` and `httpx` versions plus runtime requirements.
 - FastAPI `TestClient` exercises the API without starting a live server.
@@ -13,18 +13,22 @@ TAILER has a 229-case backend regression suite under `backend/tests/`.
   are isolated around tests.
 - Repository tests cover idempotent/pepper-aware seeding, commit/rollback,
   detached memory records, serialized memory transactions, HMAC lookup,
-  hash-at-rest, and SQL durability after reopening the engine.
+  hash-at-rest, SQL durability after reopening the engine, safe expected-write
+  failure mapping, and rollback after flushed usage writes.
 - Credential tests cover AES-256-GCM round-trips, unique nonces, authenticated
   associated-data binding, tamper rejection, missing-version failure, safe
   hints, and version rotation.
 - Provider tests exercise OpenAI Chat Completions and native Gemini Interactions
   against mocked upstreams, strict response parsing, thought-token accounting,
   configured alias/pricing resolution, metadata-only admin responses, sanitized
-  error mapping, secret-safe logs, and durable provider-failure events with
-  stable `error_code` values. Smoke-orchestration tests cover loopback pinning,
+  error mapping with explicit execution certainty, secret-safe logs, and
+  certainty-appropriate durable provider-failure outcomes with stable
+  `error_code` values. Smoke-orchestration tests cover loopback pinning,
   timeout validation, full-stack health, exact cleanup, secret exclusion from
   Compose, and cleanup retry.
-- The standalone migration test reaches Alembic revision `0003`, checks schema drift, and performs upgrade/downgrade/re-upgrade.
+- The standalone migration test reaches Alembic revision `0004`, inspects the
+  request-attempt constraints, foreign keys, indexes, and historical null usage
+  links, checks schema drift, and performs upgrade/downgrade/re-upgrade.
 - `.tailer-runs/` is generated local smoke output, not the tracked regression layer.
 
 The automated suite needs no live backend, PostgreSQL, or Redis process. SQLite supplies the isolated SQL implementation; PostgreSQL and Compose are verified separately.
@@ -39,7 +43,7 @@ npm run lint
 npm run build
 ~~~
 
-Both passed on 2026-08-02.
+Both passed on 2026-08-24.
 
 ### Backend
 
@@ -48,11 +52,14 @@ cd backend
 pip install -r requirements-dev.txt
 python -m compileall -q app tests
 python -m pytest -q
-python -m pytest -q tests/test_runtime.py tests/test_repositories.py tests/test_migrations.py tests/test_auth.py tests/test_admin.py
+python -m pytest -q tests/test_request_attempts.py tests/test_runtime.py tests/test_repositories.py tests/test_migrations.py tests/test_providers.py tests/test_gemini_provider.py tests/test_provider_api_integration.py
 ~~~
 
-Both pytest orders passed on 2026-08-02: 229 tests in normal order and 229 in
-reversed file order, using `cryptography` 49.0.0.
+On 2026-08-24, compilation passed, the focused I0003 runtime/repository/
+migration/provider matrix passed 267 tests, and the full suite passed 386 tests
+in normal order. The preceding I0002 baseline passed 259 tests on the same
+date. The earlier 229-case suite passed in normal and reversed file order on
+2026-08-02, using `cryptography` 49.0.0.
 
 The remaining warnings are understood third-party/dialect warnings:
 
@@ -89,7 +96,8 @@ backend logs contained no probe bearer/identity or error markers.
 The Windows controller also passed help, configuration, status, service
 filtering, interactive exit, error/exit-code, and outside-working-directory
 checks. The Bash controller passed syntax and help checks. Current Compose and
-controller configuration validation also passes.
+controller configuration validation also passes. `docker compose config
+--quiet` passed again on 2026-08-24.
 
 For Iteration 2, a clean backend image built with `cryptography` 49.0.0 and a
 disposable PostgreSQL 16 database completed upgrade, `alembic check`, downgrade,
@@ -211,7 +219,39 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   }'
 ~~~
 
-Expected: HTTP 200 with an OpenAI-style response from `MockProvider` and a usage object. A durable usage row is committed before the success response returns.
+Expected: HTTP 200 with an OpenAI-style response from `MockProvider`, a usage
+object, and a `Tailer-Attempt-Id` response header. A durable attempt and its
+linked usage row are committed before the success response returns.
+
+For duplicate protection, add a unique, stable header value such as
+`Idempotency-Key: smoke-<client-generated-id>`. The value is optional,
+case-sensitive, and limited to 1–255 visible ASCII characters without
+whitespace. It is HMACed rather than stored. Omitting it preserves the
+backwards-compatible behavior in which each request is a fresh attempt.
+
+If the provider returns successfully but an expected local usage flush or
+commit failure prevents finalization, the response is HTTP 503 with exactly
+`{"detail":"Usage finalization is unavailable"}`. The same detail is used if
+a provider-failure audit event cannot be finalized. Focused tests prove one
+provider call, one cost calculation after provider success, no automatic
+provider retry, and no committed usage row through either adapter for the
+injected failed-flush/pre-commit paths. The endpoint has no cross-request
+automatic recovery contract. With a retained `Idempotency-Key`, the failed
+attempt remains fenced and a client retry does not call the provider again;
+without the header, a retry is a fresh request.
+
+For the same authenticated Sub-API key, canonical effective request, operation,
+and retained `Idempotency-Key`, the tested contract is at most one provider
+dispatch and at most one linked usage event. Successful content is not stored,
+so a matching completed duplicate returns HTTP 409 with
+`completed_result_not_replayable`. A different payload under the same retained
+key returns HTTP 409 with `idempotency_key_reused`; an in-progress duplicate
+returns HTTP 409 with `request_in_progress`. A definite provider non-execution
+replays only its sanitized error envelope, while an uncertain provider outcome
+returns the fixed fenced HTTP 503 contract on later duplicates. Resolved keyed
+identities use the configured retention window (30 days by default); uncertain
+identities do not expire automatically. The API does not promise exactly-once
+provider execution or charging, output replay, automatic recovery, or liveness.
 
 ### 6. Runtime rejection cases
 
@@ -222,6 +262,7 @@ Expected: HTTP 200 with an OpenAI-style response from `MockProvider` and a usage
 | Expired Sub-API key | 401 |
 | Model absent from the key allow list | 403 |
 | Requested `max_tokens` exceeds the key ceiling | 403 |
+| Invalid `Idempotency-Key` | 400, no attempt or provider call |
 | Valid allowed model | 200 |
 
 The runtime checks active status, expiration, project state, model permission,
@@ -428,6 +469,25 @@ The current suite covers:
   provider-route, provider-call, and cost-calculation work for denials
 - provider option forwarding, measured latency, and normalized successful usage
 - rejection of invalid provider usage/cost before ledger mutation
+- optional metadata-only request identity, exact duplicate/error envelopes, and
+  `Tailer-Attempt-Id` propagation without changing the success body
+- deterministic two-client keyed races through both adapters, including real
+  SQL uniqueness, with one claim, one provider call, one cost calculation, and
+  one linked usage event
+- claim and terminal commit-acknowledgement ambiguity, dispatch-token ownership,
+  double-finalization fencing, and fixed secret-safe availability responses
+- 30-day resolved identity retirement with preserved historical accounting
+  anchors, plus indefinite fencing for unresolved attempts
+- raw bearer/idempotency keys, canonical requests, prompts, outputs, provider
+  payloads, and persistence-driver sentinels excluded from attempt/usage rows,
+  handled duplicate/failure responses, and captured logs
+- synthetic Mock/Gemini response IDs derived from transient content excluded
+  from durable attempt metadata while allowlisted upstream IDs remain usable
+- provider-success/local-finalization failure with exactly one provider call,
+  one cost calculation, fixed secret-safe HTTP 503 detail, no automatic retry,
+  and no committed usage row through either adapter
+- matching finalization-failure behavior for provider-failure audit writes,
+  plus SQL flush/commit rollback and programming-error pass-through
 - versioned AES-256-GCM encryption, associated-data binding, redaction, tamper
   detection, missing-key failure, and re-encryption to an active key version
 - provider-credential and model-configuration repository/API contracts without
@@ -440,10 +500,12 @@ The current suite covers:
 - sanitized timeout, availability, authentication, permission, not-found,
   rate-limit, request-rejection, and malformed-response errors
 - durable zero-token provider-failure events with stable `error_code` values
+  when local audit finalization succeeds
 - identical API behavior through in-memory and SQLAlchemy adapters
 - unit-of-work commit/rollback, detached memory reads, and serialized memory transactions
 - two-run seed idempotency, pepper-change preservation, and SQL durability after engine reopen
-- environment-driven Alembic migration round-trip through `0003`, legacy latency backfill, and drift detection
+- environment-driven Alembic migration round-trip through `0004`, legacy
+  latency backfill, request-attempt schema inspection, and drift detection
 
 ## Known unimplemented test areas
 
@@ -454,4 +516,6 @@ The current suite covers:
 - Redis/concurrency quota tests await policy enforcement.
 - Provider-failure audit tests exist; pre-provider blocked-event audit tests
   await that durable event type.
+- Automated attempt recovery/reconciliation, response replay, and a request
+  status API are intentionally absent from the current contract.
 - Production backup, restore, HTTPS, and secret-rotation drills are not defined.

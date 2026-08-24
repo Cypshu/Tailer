@@ -2,6 +2,7 @@ from collections.abc import Callable, Iterator
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from alembic import command
@@ -12,6 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
+from app.database import enable_sqlite_foreign_keys
 from app.demo_seed import DEMO_RAW_KEYS, build_demo_records, seed_demo_data
 from app.domain import KeyRecord
 from app.main import app
@@ -24,7 +26,11 @@ from app.providers import (
     MockProvider,
     set_provider,
 )
-from app.repositories.base import UnitOfWorkFactory
+from app.repositories.base import (
+    AbstractUnitOfWork,
+    PersistenceWriteError,
+    UnitOfWorkFactory,
+)
 from app.repositories.dependencies import get_uow_factory
 from app.repositories.memory import MemoryStore, MemoryUnitOfWorkFactory
 from app.repositories.sqlalchemy import SqlAlchemyUnitOfWorkFactory
@@ -72,6 +78,8 @@ def sql_uow_factory(
         connect_args={"check_same_thread": False},
         pool_pre_ping=True,
     )
+    enable_sqlite_foreign_keys(engine)
+
     factory = SqlAlchemyUnitOfWorkFactory(
         sessionmaker(
             bind=engine,
@@ -95,9 +103,136 @@ def uow_factory(request: pytest.FixtureRequest) -> UnitOfWorkFactory:
     return request.getfixturevalue("sql_uow_factory")
 
 
+class _FailingCommitUnitOfWork:
+    def __init__(
+        self,
+        owner: "_FailingCommitUnitOfWorkFactory",
+    ) -> None:
+        self._owner = owner
+        self._delegate = owner.delegate_factory()
+
+    def __enter__(self):
+        entered = self._delegate.__enter__()
+        self.users = entered.users
+        self.projects = entered.projects
+        self.provider_credentials = entered.provider_credentials
+        self.model_configs = entered.model_configs
+        self.keys = entered.keys
+        self.usage = entered.usage
+        self.attempts = entered.attempts
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self._delegate.__exit__(exc_type, exc_value, traceback)
+
+    def commit(self) -> None:
+        self._owner.commit(self._delegate)
+
+    def rollback(self) -> None:
+        self._delegate.rollback()
+
+
+class _FailingCommitUnitOfWorkFactory:
+    def __init__(
+        self,
+        delegate_factory: UnitOfWorkFactory,
+        failure_factory: Callable[[], BaseException],
+        *,
+        fail_on_commit: int = 1,
+        persist_before_failure: bool = False,
+    ) -> None:
+        self.delegate_factory = delegate_factory
+        self.failure_factory = failure_factory
+        self.fail_on_commit = fail_on_commit
+        self.persist_before_failure = persist_before_failure
+        self._commit_count = 0
+        self._lock = Lock()
+
+    def __call__(self) -> AbstractUnitOfWork:
+        return _FailingCommitUnitOfWork(self)
+
+    def commit(self, delegate: AbstractUnitOfWork) -> None:
+        with self._lock:
+            self._commit_count += 1
+            commit_number = self._commit_count
+        if commit_number != self.fail_on_commit:
+            delegate.commit()
+            return
+        if self.persist_before_failure:
+            delegate.commit()
+        raise self.failure_factory()
+
+
+@pytest.fixture
+def failing_commit_factory(
+    uow_factory: UnitOfWorkFactory,
+) -> Callable[[Callable[[], BaseException]], UnitOfWorkFactory]:
+    def build(
+        failure_factory: Callable[[], BaseException],
+    ) -> UnitOfWorkFactory:
+        return _FailingCommitUnitOfWorkFactory(uow_factory, failure_factory)
+
+    return build
+
+
+@pytest.fixture
+def scripted_commit_factory(
+    uow_factory: UnitOfWorkFactory,
+) -> Callable[..., UnitOfWorkFactory]:
+    def build(
+        failure_factory: Callable[[], BaseException],
+        *,
+        fail_on_commit: int,
+        persist_before_failure: bool = False,
+    ) -> UnitOfWorkFactory:
+        return _FailingCommitUnitOfWorkFactory(
+            uow_factory,
+            failure_factory,
+            fail_on_commit=fail_on_commit,
+            persist_before_failure=persist_before_failure,
+        )
+
+    return build
+
+
+@dataclass(frozen=True)
+class PersistenceFailureHarness:
+    factory: UnitOfWorkFactory
+    driver_detail: str
+    sentinel_secret: str
+
+
+@pytest.fixture
+def persistence_failure_harness(
+    scripted_commit_factory: Callable[..., UnitOfWorkFactory],
+) -> PersistenceFailureHarness:
+    driver_detail = "sqlite3.OperationalError: simulated commit failure"
+    sentinel_secret = "tailer_sub_SENTINEL_FINALIZATION_SECRET"
+    factory = scripted_commit_factory(
+        lambda: PersistenceWriteError(f"{driver_detail}; {sentinel_secret}"),
+        fail_on_commit=2,
+    )
+    return PersistenceFailureHarness(
+        factory=factory,
+        driver_detail=driver_detail,
+        sentinel_secret=sentinel_secret,
+    )
+
+
 @pytest.fixture
 def client(uow_factory: UnitOfWorkFactory) -> Iterator[TestClient]:
     app.dependency_overrides[get_uow_factory] = lambda: uow_factory
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def persistence_failure_client(
+    persistence_failure_harness: PersistenceFailureHarness,
+) -> Iterator[TestClient]:
+    app.dependency_overrides[get_uow_factory] = (
+        lambda: persistence_failure_harness.factory
+    )
     with TestClient(app) as test_client:
         yield test_client
 
@@ -185,6 +320,7 @@ class RecordingProvider:
                 completion_tokens=7,
                 total_tokens=18,
             ),
+            durable_provider_result_id="chatcmpl_test",
         )
         self.cost = 0.0123
 
