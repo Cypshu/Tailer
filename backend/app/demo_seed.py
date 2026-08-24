@@ -79,9 +79,11 @@ def build_demo_records(
                 key_prefix=sub_api_key_prefix(raw_key),
                 allowed_models=models,
                 status="active",
+                rate_limit_per_minute=None,
                 daily_request_limit=daily,
                 monthly_token_limit=monthly,
                 monthly_budget_eur=Decimal(budget),
+                max_tokens_per_request=None,
                 created_at=_utc(created_at),
                 expires_at=_utc("2099-12-31T23:59:59Z"),
             )

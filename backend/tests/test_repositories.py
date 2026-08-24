@@ -201,9 +201,9 @@ def test_hmac_digest_is_the_only_secret_used_for_repository_lookup(
     assert wrong_key is None
 
     service = TailerService(uow_factory)
-    assert service.authorize_runtime_key(raw_key, "gpt-4o-mini").id == "subkey_1"
+    assert service.authorize_runtime_key(raw_key, "gpt-4o-mini", 64).id == "subkey_1"
     with pytest.raises(AuthenticationError, match="Invalid or inactive API key"):
-        service.authorize_runtime_key(f"{raw_key}-wrong", "gpt-4o-mini")
+        service.authorize_runtime_key(f"{raw_key}-wrong", "gpt-4o-mini", 64)
 
 
 def test_sqlalchemy_commit_survives_engine_reopen_and_stores_no_raw_secret(

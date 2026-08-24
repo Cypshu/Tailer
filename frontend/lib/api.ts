@@ -23,9 +23,11 @@ export interface SubApiKey {
   owner_id: string
   allowed_models: string[]
   status: 'active' | 'paused' | 'revoked' | 'expired'
+  rate_limit_per_minute: number | null
   daily_request_limit: number
   monthly_token_limit: number
   monthly_budget_eur: number
+  max_tokens_per_request: number | null
   created_at: string
   expires_at: string
 }
@@ -118,9 +120,11 @@ export const api = {
       name: string
       owner_user_id: string
       allowed_models: string[]
+      rate_limit_per_minute?: number | null
       daily_request_limit: number
       monthly_token_limit: number
       monthly_budget_eur: number
+      max_tokens_per_request?: number | null
       expires_at: string
     }) =>
       apiCall('/admin/keys', {

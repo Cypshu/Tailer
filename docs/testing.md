@@ -221,9 +221,13 @@ Expected: HTTP 200 with an OpenAI-style response from `MockProvider` and a usage
 | Revoked Sub-API key | 401 |
 | Expired Sub-API key | 401 |
 | Model absent from the key allow list | 403 |
+| Requested `max_tokens` exceeds the key ceiling | 403 |
 | Valid allowed model | 200 |
 
-The runtime checks active status, expiration, project state, model permission, and request-schema bounds before provider invocation. It does not yet enforce rate limits, request-count/token budgets, or per-key maximum-token policy.
+The runtime checks active status, expiration, project state, model permission,
+per-key output-token ceiling, and request-schema bounds before provider-route
+resolution. It does not yet enforce rate limits or aggregate request-count/token
+budgets.
 
 ### 7. Provider-management contract
 
@@ -420,6 +424,8 @@ The current suite covers:
 - creation-only raw keys, HMAC lookup, and absence of raw secrets from persisted hashes
 - valid, invalid, revoked, expired, and model-denied runtime keys
 - request validation before provider invocation
+- exact-boundary and over-limit per-key output-token policy, including zero
+  provider-route, provider-call, and cost-calculation work for denials
 - provider option forwarding, measured latency, and normalized successful usage
 - rejection of invalid provider usage/cost before ledger mutation
 - versioned AES-256-GCM encryption, associated-data binding, redaction, tamper

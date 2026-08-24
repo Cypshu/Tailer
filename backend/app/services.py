@@ -29,6 +29,7 @@ from app.models import (
     CreateProviderCredentialRequest,
     CreateUserRequest,
 )
+from app.policies import PolicyCode, evaluate_static_request_policy
 from app.providers import GeminiProvider, OpenAIProvider, Provider, get_provider
 from app.repositories.base import PersistenceConflictError, UnitOfWorkFactory
 
@@ -42,7 +43,9 @@ class AuthenticationError(DomainError):
 
 
 class AuthorizationError(DomainError):
-    pass
+    def __init__(self, message: str, *, code: PolicyCode | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ConflictError(DomainError):
@@ -173,9 +176,11 @@ class TailerService:
                 key_prefix=sub_api_key_prefix(raw_key),
                 allowed_models=list(request.allowed_models),
                 status="active",
+                rate_limit_per_minute=request.rate_limit_per_minute,
                 daily_request_limit=request.daily_request_limit,
                 monthly_token_limit=request.monthly_token_limit,
                 monthly_budget_eur=Decimal(str(request.monthly_budget_eur)),
+                max_tokens_per_request=request.max_tokens_per_request,
                 created_at=now,
                 expires_at=request.expires_at,
             )
@@ -372,7 +377,12 @@ class TailerService:
             ),
         }
 
-    def authorize_runtime_key(self, raw_key: str, model: str) -> KeyRecord:
+    def authorize_runtime_key(
+        self,
+        raw_key: str,
+        model: str,
+        max_tokens: int,
+    ) -> KeyRecord:
         digest = hash_sub_api_key(raw_key)
         with self.factory() as uow:
             key = uow.keys.get_by_hash(digest)
@@ -383,8 +393,17 @@ class TailerService:
             raise AuthenticationError("Invalid or inactive API key")
         if key.expires_at <= datetime.now(timezone.utc):
             raise AuthenticationError("API key has expired")
-        if model not in key.allowed_models:
-            raise AuthorizationError(f"Model {model} not allowed for this key")
+        decision = evaluate_static_request_policy(
+            allowed_models=key.allowed_models,
+            requested_model=model,
+            max_tokens_per_request=key.max_tokens_per_request,
+            requested_max_tokens=max_tokens,
+        )
+        if not decision.allowed:
+            raise AuthorizationError(
+                decision.message or "Request is not allowed for this key",
+                code=decision.code,
+            )
         if project is None or project.status != "active":
             raise ConfigurationError("Key project is unavailable")
         return key

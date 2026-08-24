@@ -7,7 +7,8 @@ FastAPI backend for the TAILER development prototype.
 - JWT login at `POST /api/auth/login`
 - JWT-protected admin and user routes
 - Sub-API-key-protected `POST /v1/chat/completions`
-- Validated request boundaries and active, expiry, project, and allowed-model checks
+- Validated request boundaries and active, expiry, project, allowed-model, and
+  optional per-key output-token ceiling checks
 - Repository and unit-of-work boundaries shared by all active routes
 - SQLAlchemy/PostgreSQL as the default runtime adapter
 - An in-memory adapter for isolated tests
@@ -31,7 +32,7 @@ Development limitations:
 
 - passwords are seeded display names;
 - deterministic demo bearer keys and development secrets exist in source;
-- quotas, budgets, and per-key maximum-token policy are not enforced;
+- request-rate quotas and aggregate token/cost budgets are not enforced;
 - pre-provider blocked requests do not yet create audit events;
 - Redis is not used by active policy code;
 - provider/model management has no frontend;
@@ -89,6 +90,7 @@ app/
   main.py            app, CORS, routers, liveness/readiness
   models.py          Pydantic API schemas
   models_db.py       SQLAlchemy schemas
+  policies.py        provider-independent static request policy decisions
   providers.py       provider protocol plus Mock, OpenAI, and Gemini adapters
   serialization.py   domain-to-API mappings
   services.py        application behavior and transactions
@@ -177,6 +179,10 @@ pricing constraints.
 The configured default project receives newly created keys. Key creation generates a high-entropy bearer, returns it once, and persists only its HMAC digest plus a non-secret display prefix. Runtime authorization hashes the presented bearer and performs an indexed digest lookup before policy checks.
 
 The SQLAlchemy unit of work owns one session per transaction. The in-memory adapter uses copy-on-write state, explicit commit/rollback, detached reads, and serialized transactions so its behavior matches SQL closely. Runtime authorization closes its read transaction before provider I/O and writes usage in a separate short transaction.
+
+Nullable per-key request-rate and output-token limits round-trip through both
+adapters. The output-token ceiling is enforced before provider-route resolution;
+the request-rate value is metadata only until dynamic rate enforcement is added.
 
 `POST|GET /admin/provider-credentials` and
 `DELETE /admin/provider-credentials/{credential_id}` accept or manage a secret

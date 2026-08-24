@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.repositories.base import UnitOfWorkFactory
+from app.services import TailerService
 
 
 def _completion_payload() -> dict:
@@ -91,6 +92,30 @@ def test_valid_completion_forwards_options_and_adds_one_usage_event(
     assert event.status == "success"
 
 
+def test_request_at_max_tokens_policy_boundary_is_allowed_without_clamping(
+    client: TestClient,
+    active_key,
+    recording_provider,
+    mutate_key: Callable[..., None],
+) -> None:
+    payload = _completion_payload()
+    mutate_key(
+        active_key.record.id,
+        max_tokens_per_request=payload["max_tokens"],
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {active_key.raw_key}"},
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert recording_provider.calls[0]["max_tokens"] == payload["max_tokens"]
+    assert len(recording_provider.calls) == 1
+    assert len(recording_provider.cost_calls) == 1
+
+
 @pytest.mark.parametrize(
     ("case", "expected_status", "expected_detail"),
     [
@@ -98,6 +123,11 @@ def test_valid_completion_forwards_options_and_adds_one_usage_event(
         ("invalid_key", 401, "Invalid or inactive API key"),
         ("revoked_key", 401, "Invalid or inactive API key"),
         ("forbidden_model", 403, "Model gpt-4-preview not allowed for this key"),
+        (
+            "max_tokens_exceeded",
+            403,
+            "Requested max_tokens (64) exceeds this key's limit (63)",
+        ),
         ("expired_key", 401, "API key has expired"),
     ],
 )
@@ -110,9 +140,26 @@ def test_pre_provider_rejections_do_not_add_success_usage(
     case: str,
     expected_status: int,
     expected_detail: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     payload = _completion_payload()
     headers = {"Authorization": f"Bearer {active_key.raw_key}"}
+    resolution_calls: list[tuple[str, str]] = []
+    original_resolver = TailerService.resolve_runtime_provider
+
+    def recording_resolver(
+        service: TailerService,
+        key,
+        public_model: str,
+    ):
+        resolution_calls.append((key.id, public_model))
+        return original_resolver(service, key, public_model)
+
+    monkeypatch.setattr(
+        TailerService,
+        "resolve_runtime_provider",
+        recording_resolver,
+    )
 
     if case == "missing_header":
         headers = {}
@@ -122,6 +169,8 @@ def test_pre_provider_rejections_do_not_add_success_usage(
         mutate_key(active_key.record.id, status="revoked")
     elif case == "forbidden_model":
         payload["model"] = "gpt-4-preview"
+    elif case == "max_tokens_exceeded":
+        mutate_key(active_key.record.id, max_tokens_per_request=63)
     elif case == "expired_key":
         mutate_key(
             active_key.record.id,
@@ -137,6 +186,7 @@ def test_pre_provider_rejections_do_not_add_success_usage(
 
     assert response.status_code == expected_status
     assert response.json() == {"detail": expected_detail}
+    assert resolution_calls == []
     assert recording_provider.calls == []
     assert recording_provider.cost_calls == []
     assert _usage_ids(uow_factory) == before_ids

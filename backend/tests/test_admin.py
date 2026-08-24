@@ -145,6 +145,8 @@ def test_create_key_for_existing_owner(
     assert body["owner_id"] == payload["owner_user_id"]
     assert body["allowed_models"] == payload["allowed_models"]
     assert body["status"] == "active"
+    assert body["rate_limit_per_minute"] is None
+    assert body["max_tokens_per_request"] is None
     assert body["key"].startswith("tailer_sub_")
     assert body["key_prefix"]
     assert body["key_prefix"] != body["key"]
@@ -155,6 +157,8 @@ def test_create_key_for_existing_owner(
         stored = uow.keys.get_by_id(key_id)
         assert stored is not None
         assert len(uow.keys.list()) == before_count + 1
+        assert stored.rate_limit_per_minute is None
+        assert stored.max_tokens_per_request is None
         assert stored.key_hash == hash_sub_api_key(body["key"])
         assert body["key"] not in stored.key_hash
 
@@ -163,9 +167,48 @@ def test_create_key_for_existing_owner(
     assert detail.status_code == 200
     assert "key" not in detail.json()
     assert detail.json()["key_prefix"] == body["key_prefix"]
+    assert detail.json()["rate_limit_per_minute"] is None
+    assert detail.json()["max_tokens_per_request"] is None
     listed = next(key for key in listing.json() if key["id"] == key_id)
     assert "key" not in listed
     assert listed["key_prefix"] == body["key_prefix"]
+    assert listed["rate_limit_per_minute"] is None
+    assert listed["max_tokens_per_request"] is None
+
+
+def test_create_key_round_trips_optional_policy_limits(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    uow_factory: UnitOfWorkFactory,
+) -> None:
+    payload = _valid_key_payload()
+    payload.update(
+        rate_limit_per_minute=12,
+        max_tokens_per_request=128,
+    )
+
+    response = client.post("/admin/keys", headers=admin_headers, json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    key_id = body["id"]
+    assert body["rate_limit_per_minute"] == 12
+    assert body["max_tokens_per_request"] == 128
+
+    with uow_factory() as uow:
+        stored = uow.keys.get_by_id(key_id)
+    assert stored is not None
+    assert stored.rate_limit_per_minute == 12
+    assert stored.max_tokens_per_request == 128
+
+    detail = client.get(f"/admin/keys/{key_id}", headers=admin_headers)
+    listing = client.get("/admin/keys", headers=admin_headers)
+    assert detail.status_code == 200
+    assert detail.json()["rate_limit_per_minute"] == 12
+    assert detail.json()["max_tokens_per_request"] == 128
+    listed = next(key for key in listing.json() if key["id"] == key_id)
+    assert listed["rate_limit_per_minute"] == 12
+    assert listed["max_tokens_per_request"] == 128
 
 
 def test_create_key_requires_existing_owner(
@@ -191,12 +234,16 @@ def test_create_key_requires_existing_owner(
     [
         ("allowed_models", []),
         ("allowed_models", ["   "]),
+        ("rate_limit_per_minute", 0),
+        ("rate_limit_per_minute", -1),
         ("daily_request_limit", 0),
         ("daily_request_limit", -1),
         ("monthly_token_limit", 0),
         ("monthly_token_limit", -1),
         ("monthly_budget_eur", 0),
         ("monthly_budget_eur", -0.01),
+        ("max_tokens_per_request", 0),
+        ("max_tokens_per_request", -1),
         ("expires_at", "2020-01-01T00:00:00Z"),
         ("expires_at", "not-a-date"),
     ],

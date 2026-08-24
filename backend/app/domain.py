@@ -79,9 +79,11 @@ class KeyRecord:
     key_prefix: str
     allowed_models: list[str]
     status: Literal["active", "paused", "revoked", "expired"]
+    rate_limit_per_minute: int | None
     daily_request_limit: int
     monthly_token_limit: int
     monthly_budget_eur: Decimal
+    max_tokens_per_request: int | None
     created_at: datetime
     expires_at: datetime
 

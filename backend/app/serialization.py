@@ -41,9 +41,11 @@ def key_response(record: KeyRecord) -> SubApiKey:
         owner_id=record.owner_id,
         allowed_models=record.allowed_models,
         status=record.status,
+        rate_limit_per_minute=record.rate_limit_per_minute,
         daily_request_limit=record.daily_request_limit,
         monthly_token_limit=record.monthly_token_limit,
         monthly_budget_eur=float(record.monthly_budget_eur),
+        max_tokens_per_request=record.max_tokens_per_request,
         created_at=_iso_utc(record.created_at),
         expires_at=_iso_utc(record.expires_at),
     )

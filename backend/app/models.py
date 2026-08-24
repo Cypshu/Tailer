@@ -78,9 +78,11 @@ class SubApiKey(BaseModel):
     owner_id: str
     allowed_models: list[str]
     status: Literal["active", "paused", "revoked", "expired"]
+    rate_limit_per_minute: PositiveInt | None
     daily_request_limit: int
     monthly_token_limit: int
     monthly_budget_eur: float
+    max_tokens_per_request: PositiveInt | None
     created_at: str
     expires_at: str
 
@@ -182,9 +184,11 @@ class CreateKeyRequest(BaseModel):
     name: str
     owner_user_id: str
     allowed_models: Annotated[list[NonEmptyString], Field(min_length=1)]
+    rate_limit_per_minute: PositiveInt | None = None
     daily_request_limit: PositiveInt = 500
     monthly_token_limit: PositiveInt = 1000000
     monthly_budget_eur: PositiveFloat = 50.0
+    max_tokens_per_request: PositiveInt | None = None
     expires_at: datetime
 
     @field_validator("expires_at")

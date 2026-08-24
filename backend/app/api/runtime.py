@@ -61,6 +61,7 @@ async def chat_completions(
             service.authorize_runtime_key,
             raw_key,
             request.model,
+            request.max_tokens,
         )
     except AuthenticationError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
